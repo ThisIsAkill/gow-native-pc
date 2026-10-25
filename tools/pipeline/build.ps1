@@ -68,9 +68,24 @@ $portable = @{
     python = @{ url = 'https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip'
                 sha = '97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297'; dir = 'python'; exe = 'python.exe'; mb = 11 }
     cmake  = @{ url = 'https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-windows-x86_64.zip'
-                sha = '0c4baa40f28b3f8225eb3fdf6946c987b4fe901403b4eaf2fbbd9378100aaa0c'; dir = 'cmake'; exe = 'cmake-3.31.12-windows-x86_64\bin\cmake.exe'; mb = 52 }
+                sha = '0c4baa40f28b3f8225eb3fdf6946c987b4fe901403b4eaf2fbbd9378100aaa0c'; dir = 'cmake'; exe = 'cmake-3.31.12-windows-x86_64\bin\cmake.exe'; mb = 52
+                skip = @('*/doc/*', '*/man/*') }
     ninja  = @{ url = 'https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip'
                 sha = '07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65'; dir = 'ninja'; exe = 'ninja.exe'; mb = 1 }
+}
+# Unpacks a zip with Windows' own tar.exe (bsdtar, Windows 10 1803+): a few seconds where Expand-Archive took minutes on
+# archives of thousands of small files. skip: path patterns left out (documentation, unused targets).
+function Expand-Zip([string]$zip, [string]$dest, [string[]]$skip = @()) {
+    New-Item -ItemType Directory -Force $dest | Out-Null
+    $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    if (Test-Path $tar) {
+        $a = @('-xf', $zip, '-C', $dest)
+        foreach ($x in $skip) { $a += @('--exclude', $x) }
+        & $tar @a
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Host "tar failed (rc=$LASTEXITCODE), unpacking with Expand-Archive"
+    }
+    Expand-Archive -Path $zip -DestinationPath $dest -Force
 }
 function Get-PortableTool([string]$name) {
     $t = $portable[$name]
@@ -89,7 +104,7 @@ function Get-PortableTool([string]$name) {
     }
     Write-Host "@@status unpacking $name"
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-    Expand-Archive -Path $zip -DestinationPath $dest -Force
+    Expand-Zip $zip $dest $(if ($t.skip) { $t.skip } else { @() })
     Remove-Item $zip
     # the embeddable Python's ._pth file would keep each script's own folder off sys.path
     if ($name -eq 'python') { Get-ChildItem $dest -Filter '*._pth' | Remove-Item }
@@ -186,8 +201,11 @@ function Use-Clang {
             Invoke-WebRequest -UseBasicParsing "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/$llvmVersion.zip" -OutFile $zip
             if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $llvmSha256) { Remove-Item $zip; throw "$llvmVersion.zip: unexpected SHA-256" }
         }
+        Write-Host "@@status unpacking the clang compiler"
         Write-Host "unpacking $llvmVersion"
-        Expand-Archive -Path $zip -DestinationPath $tools -Force
+        # only the x86-64 Windows target is used: the i686 / ARM sysroots and the debugger's Python stay out
+        Expand-Zip $zip $tools @('*/aarch64-w64-mingw32/*', '*/armv7-w64-mingw32/*', '*/i686-w64-mingw32/*', '*/python/*')
+        Remove-Item $zip
     }
     $paths = @(Join-Path $llvm 'bin')
     # the MSVC environment (INCLUDE, LIB) must not leak into the mingw target
