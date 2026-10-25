@@ -382,6 +382,12 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.remove(QStringLiteral("TOBIICHI_TECLAS"));
     else
         entorno.insert(QStringLiteral("TOBIICHI_TECLAS"), teclas);
+    // Controller layout changed button by button (ps2_pad.cpp): "action=button,button;..."; empty = the fixed layout.
+    const QString mandoMapa = a.value(QStringLiteral("mando")).toString();
+    if (mandoMapa.isEmpty())
+        entorno.remove(QStringLiteral("TOBIICHI_MANDO"));
+    else
+        entorno.insert(QStringLiteral("TOBIICHI_MANDO"), mandoMapa);
     // Cheat menu (F2 in game): the cheats active at start and the menu language.
     const QString trucos = a.value(QStringLiteral("trucos")).toString();
     if (trucos.isEmpty())

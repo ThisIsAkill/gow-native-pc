@@ -215,3 +215,68 @@ function nombre(codigo, t) {
     }
     return nombres[codigo] || ("#" + codigo)
 }
+
+// ---- Controller (gow-native-pc) ------------------------------------------------------------------------------------
+// Buttons are the game's raylib codes (GAMEPAD_BUTTON_*), named as on an Xbox controller; the map goes to the game in
+// TOBIICHI_MANDO (ps2_pad.cpp). The sticks stay analog and are not mapped.
+var accionesMando = acciones.filter(function (a) { return a.grupo !== "grupoMovimiento" && a.grupo !== "grupoAvanzado" })
+    .concat([{ id: "l3", grupo: "grupoMenus", boton: "L3" }, { id: "r3", grupo: "grupoMenus", boton: "R3" }])
+
+var nombresMando = { 1: "D-pad ↑", 2: "D-pad →", 3: "D-pad ↓", 4: "D-pad ←", 5: "Y", 6: "B", 7: "A", 8: "X", 9: "LB",
+                     10: "LT", 11: "RB", 12: "RT", 13: "Back", 15: "Start", 16: "LS", 17: "RS" }
+
+// The game's fixed layouts (ps2_pad.cpp): modern (default) or classic. Magics stay on the d-pad, as in the game.
+function predeterminadoMando(moderno) {
+    var m = {
+        up: [1], right: [2], down: [3], left: [4], start: [15], select: [13], l3: [16], r3: [17],
+        cross: [7], l1: [9], r1: [11], artemisa: [], furia: [], poseidon: [], medusa: [], zeus: [], hades: []
+    }
+    if (moderno) {
+        m.square = [5]; m.triangle = [6]; m.circle = [8]; m.r2 = [10]; m.l2 = [12]
+    } else {
+        m.square = [8]; m.triangle = [5]; m.circle = [6]; m.l2 = [10]; m.r2 = [12]
+    }
+    return m
+}
+
+function leerMando(texto, moderno) {
+    var base = predeterminadoMando(moderno)
+    if (!texto)
+        return base
+    try {
+        var guardado = JSON.parse(texto)
+        for (var i = 0; i < accionesMando.length; ++i) {
+            var id = accionesMando[i].id
+            if (Array.isArray(guardado[id]))
+                base[id] = guardado[id].slice(0, 2).filter(function (c) { return typeof c === "number" && c >= 1 && c <= 17 })
+        }
+    } catch (e) {
+    }
+    return base
+}
+
+function cadenaMando(mapa) {
+    var partes = []
+    for (var i = 0; i < accionesMando.length; ++i) {
+        var id = accionesMando[i].id
+        var botones = mapa[id] || []
+        if (botones.length > 0)
+            partes.push(id + "=" + botones.join(","))
+    }
+    return partes.join(";")
+}
+
+function conflictosMando(mapa, accion, codigo) {
+    var resultado = []
+    for (var i = 0; i < accionesMando.length; ++i) {
+        var otra = accionesMando[i].id
+        if (otra !== accion && (mapa[otra] || []).indexOf(codigo) >= 0)
+            resultado.push(otra)
+    }
+    return resultado
+}
+
+function nombreMando(codigo) {
+    if (!codigo) return "—"
+    return nombresMando[codigo] || ("#" + codigo)
+}

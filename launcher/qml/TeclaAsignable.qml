@@ -9,6 +9,7 @@ Rectangle {
     property bool conflicto: false
     property bool capturando: false
     property string aviso: ""
+    property bool esMando: false // a controller button (Teclas.nombreMando) instead of a key
     signal elegir()
     signal borrar()
 
@@ -36,7 +37,7 @@ Rectangle {
         anchors.verticalCenterOffset: -1
         width: parent.width - 12
         horizontalAlignment: Text.AlignHCenter
-        text: raiz.capturando ? "…" : Teclas.nombre(raiz.codigo, (clave) => Tema.t(clave))
+        text: raiz.capturando ? "…" : (raiz.esMando ? Teclas.nombreMando(raiz.codigo) : Teclas.nombre(raiz.codigo, (clave) => Tema.t(clave)))
         color: raiz.codigo !== 0 ? (raiz.conflicto ? Tema.aviso : Tema.oroClaro) : Tema.textoTenue
         font.pixelSize: 13
         font.weight: Font.DemiBold

@@ -2,7 +2,7 @@
 # Launcher by YYOzcan (GPL-3.0); see CREDITS.md.
 # Build: cmake -S launcher -B launcher/build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C launcher/build
 cmake_minimum_required(VERSION 3.21)
-project(GowNativePcLauncher VERSION 1.0.0 LANGUAGES CXX)
+project(GowNativePcLauncher VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,8 @@ qt_add_executable(gow-launcher WIN32
     src/lanzador.h
     src/installer_backend.cpp
     src/installer_backend.h
+    src/mando.cpp
+    src/mando.h
     gow-launcher.rc
 )
 

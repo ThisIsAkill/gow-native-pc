@@ -1,0 +1,118 @@
+Controller layout from the launcher, button by button (TOBIICHI_MANDO).
+- ps2_pad.cpp: TOBIICHI_MANDO="action=button,button;..." with the action names of TOBIICHI_TECLAS (buttons only: up ..
+  furia, so magics, Blade of Artemis and Rage of the Gods can sit on any button too) and raylib gamepad buttons
+  (GAMEPAD_BUTTON_*: 1-4 d-pad, 5-8 face, 9-12 LB LT RB RT, 13 back, 15 start, 16/17 stick clicks). With it, every pad
+  button (d-pad, start, select and stick clicks included) follows the map instead of the fixed modern / classic layout
+  (TOBIICHI_DMC5_CONTROLS); the sticks stay analog. Without it nothing changes.
+The launcher's Controls tab writes the variable (Controller section, buttons captured from the controller through XInput).
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+index 5deb7a7..65f46a2 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -168,6 +168,61 @@ namespace
+     {
+         return negativo == positivo ? kPadStickCenter : (negativo ? 0u : 255u);
+     }
++
++    // gow-native-pc: controller layout chosen in the launcher. TOBIICHI_MANDO="accion=boton,boton;..." with the same action
++    // names as TOBIICHI_TECLAS (buttons only: up .. furia) and raylib gamepad buttons (GAMEPAD_BUTTON_*: 1-4 d-pad,
++    // 5-8 face buttons, 9-12 LB LT RB RT, 13 back, 15 start, 16/17 stick clicks). Without it the fixed layouts below
++    // (TOBIICHI_DMC5_CONTROLS) stay. The sticks are not mapped.
++    struct MapaMando
++    {
++        bool activo = false;
++        std::array<std::vector<int>, AccFuria + 1> botones;
++    };
++
++    const MapaMando &mapaMando()
++    {
++        static const MapaMando mapa = []
++        {
++            MapaMando m;
++            const char *valor = std::getenv("TOBIICHI_MANDO");
++            if (!valor || !*valor)
++                return m;
++            m.activo = true;
++            const std::string texto(valor);
++            size_t pos = 0;
++            while (pos < texto.size())
++            {
++                size_t fin = texto.find(';', pos);
++                if (fin == std::string::npos)
++                    fin = texto.size();
++                const std::string par = texto.substr(pos, fin - pos);
++                const size_t igual = par.find('=');
++                if (igual != std::string::npos)
++                {
++                    const std::string nombre = par.substr(0, igual);
++                    for (size_t a = 0; a <= AccFuria; ++a)
++                    {
++                        if (nombre != kNombresAccion[a])
++                            continue;
++                        size_t p = igual + 1;
++                        while (p < par.size())
++                        {
++                            size_t coma = par.find(',', p);
++                            if (coma == std::string::npos)
++                                coma = par.size();
++                            const int boton = std::atoi(par.substr(p, coma - p).c_str());
++                            if (boton >= GAMEPAD_BUTTON_LEFT_FACE_UP && boton <= GAMEPAD_BUTTON_RIGHT_THUMB)
++                                m.botones[a].push_back(boton);
++                            p = coma + 1;
++                        }
++                    }
++                }
++                pos = fin + 1;
++            }
++            return m;
++        }();
++        return mapa;
++    }
+ }
+ 
+ // GOW-Port: sticks desde el teclado configurable, en el orden del paquete de libpad2 (RX, RY, LX, LY). Lo usa el
+@@ -264,7 +319,16 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+             clearBit(PAD_RIGHT);
+ 
+-        if (dmc5Controls)
++        if (const MapaMando &mando = mapaMando(); mando.activo)
++        {
++            // gow-native-pc: the launcher's controller layout replaces the fixed ones for every button (d-pad included)
++            btns = 0xFFFFu;
++            for (size_t accion = 0; accion <= AccFuria; ++accion)
++                for (const int boton : mando.botones[accion])
++                    if (IsGamepadButtonDown(kGamepad, boton))
++                        clearBit(kBitAccion[accion]);
++        }
++        else if (dmc5Controls)
+         {
+             // DMC5 mapping
+             if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) // A -> Jump
+@@ -307,14 +371,17 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+                 clearBit(PAD_R2);
+         }
+ 
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+-            clearBit(PAD_START);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
+-            clearBit(PAD_SELECT);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
+-            clearBit(PAD_L3);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
+-            clearBit(PAD_R3);
++        if (!mapaMando().activo)
++        {
++            if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
++                clearBit(PAD_START);
++            if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
++                clearBit(PAD_SELECT);
++            if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
++                clearBit(PAD_L3);
++            if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
++                clearBit(PAD_R3);
++        }
+ 
+         float lx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_X);
+         float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);

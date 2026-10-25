@@ -3,6 +3,7 @@
 // ("installer", src/installer_backend.cpp) for QML.
 #include "installer_backend.h"
 #include "lanzador.h"
+#include "mando.h"
 
 #include <QDir>
 #include <QFontDatabase>
@@ -76,6 +77,7 @@ int main(int argc, char *argv[])
 
     Lanzador lanzador;
     InstallerBackend installer;
+    Mando mando;
     const QImage icono = dibujarIcono(familiaTitulo, 256);
     QDir().mkpath(lanzador.carpetaDatos());
     icono.save(lanzador.rutaIcono());
@@ -84,6 +86,7 @@ int main(int argc, char *argv[])
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("lanzador"), &lanzador);
     engine.rootContext()->setContextProperty(QStringLiteral("installer"), &installer);
+    engine.rootContext()->setContextProperty(QStringLiteral("mando"), &mando);
     engine.rootContext()->setContextProperty(QStringLiteral("fuenteTitulo"), familiaTitulo);
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
                      Qt::QueuedConnection);
