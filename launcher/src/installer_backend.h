@@ -22,6 +22,8 @@ class InstallerBackend : public QObject
     Q_PROPERTY(QString repoRoot READ repoRoot CONSTANT)
     Q_PROPERTY(QString gameId READ gameId CONSTANT)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    // the stages of the current (or last) run, as passed to run(): the loading screen plans its overall bar from them
+    Q_PROPERTY(QString stages READ stages NOTIFY runningChanged)
 
 public:
     explicit InstallerBackend(QObject *parent = nullptr);
@@ -29,6 +31,7 @@ public:
     QString repoRoot() const { return m_root; }
     QString gameId() const { return m_game; }
     bool running() const { return m_process != nullptr; }
+    QString stages() const { return m_stages; }
 
     // {tools, buildTools, runtime, game, discs: bool; runtimeDir, runner, dataDir: string}
     Q_INVOKABLE QVariantMap environment() const;
@@ -38,6 +41,9 @@ public:
     Q_INVOKABLE QVariantList languages() const;
     // the recorded VU1 code was compiled in (optimize / native stage ran): the first play does not stutter
     Q_INVOKABLE bool firstPlayPrepared() const;
+    // pictures for the loading screen: the player's own images in data/<game>/loading (png, jpg, webp; none ship with
+    // this repository), as file URLs, sorted by name
+    Q_INVOKABLE QStringList loadingArt() const;
     // the executable recompiled by the pipeline (empty when no disc was prepared)
     Q_INVOKABLE QString recompileElf() const;
     // identifies disc images (tools/disc/identify.py) in the background -> identified(list)
@@ -75,4 +81,5 @@ private:
     QString m_game = QStringLiteral("gow1");
     QProcess *m_process = nullptr;
     QByteArray m_pending;
+    QString m_stages;
 };

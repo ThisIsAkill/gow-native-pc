@@ -148,6 +148,16 @@ bool InstallerBackend::firstPlayPrepared() const
     return QFileInfo::exists(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/native.stamp"));
 }
 
+QStringList InstallerBackend::loadingArt() const
+{
+    QDir dir(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/loading"));
+    QStringList out;
+    for (const QFileInfo &f : dir.entryInfoList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg"),
+                                                 QStringLiteral("*.webp")}, QDir::Files, QDir::Name | QDir::IgnoreCase))
+        out << QUrl::fromLocalFile(f.absoluteFilePath()).toString();
+    return out;
+}
+
 QString InstallerBackend::recompileElf() const
 {
     QFile file(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/languages.json"));
@@ -185,6 +195,7 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
     args << QStringLiteral("-Config") << config;
     if (options.value(QStringLiteral("ltcg")).toBool())
         args << QStringLiteral("-Ltcg");
+    m_stages = stages;
     m_process = new QProcess(this);
     m_process->setProgram(QStringLiteral("powershell.exe"));
     m_process->setArguments(args);

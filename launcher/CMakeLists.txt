@@ -2,7 +2,7 @@
 # Launcher by YYOzcan (GPL-3.0); see CREDITS.md.
 # Build: cmake -S launcher -B launcher/build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C launcher/build
 cmake_minimum_required(VERSION 3.21)
-project(GowNativePcLauncher VERSION 2.0.0 LANGUAGES CXX)
+project(GowNativePcLauncher VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,7 @@ set(ARCHIVOS_QML
     qml/PaginaGrafico.qml
     qml/PaginaRendimiento.qml
     qml/InstallPage.qml
+    qml/LoadingScreen.qml
     qml/PaginaControles.qml
     qml/PaginaTrucos.qml
     qml/PaginaOtros.qml

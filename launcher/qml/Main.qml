@@ -534,6 +534,15 @@ ApplicationWindow {
         }
     }
 
+    // ---------------------------------------------------------------- Loading screen (while the game is built)
+    // Over the sidebar and the pages, under the title bar (z 5), so the window can still be moved, minimised or closed.
+    LoadingScreen {
+        anchors.fill: parent
+        z: 4.5
+        portada: ajustes.portada
+        onJugar: { ventana.pagina = 0; ventana.jugar() }
+    }
+
     // ---------------------------------------------------------------- Title bar (window buttons, drag area)
     Item {
         id: barra

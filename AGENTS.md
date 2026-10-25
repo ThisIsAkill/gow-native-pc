@@ -25,6 +25,9 @@ launcher/                   Qt 6 launcher (from the Tobiichi Launcher). src/lanz
                             names), src/installer_backend.* = install side (ours, English), qml/InstallPage.qml = tab.
                             Own look (not Tobiichi's): qml/Main.qml = sidebar (NavItem) + pages, `pagina` 0 Home,
                             1 Install, 2-6 settings; colours in qml/Tema.qml (oro* hold the crimson accent);
+                            qml/LoadingScreen.qml = the screen over the whole launcher during long pipeline runs
+                            (one overall bar planned from installer.stages and the "=== <step> ===" texts of
+                            build.ps1, time left, tips cargaDica1..N, the player's own pictures in data/<id>/loading);
                             screenshots: TOBIICHI_CAPTURA=<png> TOBIICHI_CAPTURA_PESTANA=<page>. icon.ico from
                             tools/make_icon.ps1 (also the installer's)
 installer/setup.cpp         release setup, Win32 + GDI+ (no Qt: one self-contained exe). Same exe packs (--pack <dir>
@@ -49,6 +52,10 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16).
+  The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
+  its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
+- **Step texts** of build.ps1 (`=== record: ...`, `=== build the game ...`, ...) are matched by prefix in
+  LoadingScreen.qml (pasoDe) and InstallPage.qml (stepLabel): change both when renaming a step.
 - The runtime registers the game's overrides for the ELF **file name** (`SCUS_973.99`) in the ELF's folder, and uses
   that folder as the CD root and `mc0/` there as the memory card: every prepared disc folder keeps the original ELF
   name; `mc0` is a junction to `data/<id>/mc0`.
