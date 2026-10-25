@@ -415,7 +415,12 @@ function Build-Game([string]$dir = $bld) {
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
     Write-Host "OK: $(Join-Path $dir 'ps2xRuntime\ps2EntryRunner.exe')"
 }
-if ($Stages -contains 'build') { Step "build the game ($Config, $Toolchain)"; Build-Game }
+if ($Stages -contains 'build') {
+    Step "build the game ($Config, $Toolchain)"
+    Build-Game
+    # a launcher update that changed the runtime patches asked for this rebuild (tools/pipeline/update.ps1)
+    Remove-Item (Join-Path $root 'data\needs-rebuild.txt') -ErrorAction SilentlyContinue
+}
 
 # --- pgo: profile-guided optimisation (clang) -----------------------------------------------------------------------
 # An instrumented copy of the game (its own build folder) plays the [optimize] pad script with the hardware renderer and

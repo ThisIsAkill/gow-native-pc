@@ -48,6 +48,12 @@ public:
     Q_INVOKABLE void cancel();
     // download pages of the requirements (Build Tools, Git, Python)
     Q_INVOKABLE void openRequirementPage(const QString &which) const;
+    // launcher updates (tools/pipeline/update.ps1): the latest GitHub release in the background -> updateChecked({version,
+    // tag, url, sha256, notes, page} or {error}); applying closes the launcher, the script replaces the files and starts it
+    // again. needsRebuild: an update changed the runtime patches (data/needs-rebuild.txt) and the game must be rebuilt.
+    Q_INVOKABLE void checkUpdate();
+    Q_INVOKABLE bool applyUpdate(const QString &url, const QString &sha256, const QString &version);
+    Q_INVOKABLE bool needsRebuild() const;
 
 signals:
     void identified(const QVariantList &discs);
@@ -56,6 +62,7 @@ signals:
     void statusText(const QString &text);
     void logLine(const QString &line);
     void finished(bool ok, int exitCode);
+    void updateChecked(const QVariantMap &info);
     void runningChanged();
 
 private:

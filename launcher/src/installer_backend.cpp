@@ -249,6 +249,42 @@ void InstallerBackend::cancel()
                                                    QString::number(m_process->processId())});
 }
 
+void InstallerBackend::checkUpdate()
+{
+    auto *p = new QProcess(this);
+    p->setProgram(QStringLiteral("powershell.exe"));
+    p->setArguments({QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"), QStringLiteral("-File"),
+                     m_root + QStringLiteral("/tools/pipeline/update.ps1"), QStringLiteral("-Check")});
+    connect(p, &QProcess::finished, this, [this, p](int, QProcess::ExitStatus)
+    {
+        const QByteArray out = p->readAllStandardOutput().trimmed();
+        const QJsonDocument doc = QJsonDocument::fromJson(out.mid(out.lastIndexOf('\n') + 1));
+        emit updateChecked(doc.isObject() ? doc.object().toVariantMap() : QVariantMap{{QStringLiteral("error"), QString::fromLocal8Bit(out)}});
+        p->deleteLater();
+    });
+    p->start();
+}
+
+bool InstallerBackend::applyUpdate(const QString &url, const QString &sha256, const QString &version)
+{
+    if (m_process || url.isEmpty())
+        return false;
+    // detached: the script waits for this process to end before replacing its files, then starts the launcher again
+    const bool started = QProcess::startDetached(QStringLiteral("powershell.exe"),
+        {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"), QStringLiteral("-WindowStyle"),
+         QStringLiteral("Hidden"), QStringLiteral("-File"), m_root + QStringLiteral("/tools/pipeline/update.ps1"), QStringLiteral("-Apply"),
+         QStringLiteral("-Url"), url, QStringLiteral("-Sha256"), sha256, QStringLiteral("-Version"), version,
+         QStringLiteral("-WaitPid"), QString::number(QCoreApplication::applicationPid())}, m_root);
+    if (started)
+        QCoreApplication::quit();
+    return started;
+}
+
+bool InstallerBackend::needsRebuild() const
+{
+    return QFileInfo::exists(m_root + QStringLiteral("/data/needs-rebuild.txt"));
+}
+
 void InstallerBackend::openRequirementPage(const QString &which) const
 {
     static const QVariantMap pages{

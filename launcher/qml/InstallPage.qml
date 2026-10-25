@@ -157,6 +157,33 @@ ScrollView {
         width: root.availableWidth
         spacing: 22
 
+        // after a launcher update that changed the runtime patches (data/needs-rebuild.txt)
+        Rectangle {
+            visible: installer.needsRebuild() && root.env.game && !installer.running
+            Layout.fillWidth: true
+            implicitHeight: aviso.implicitHeight + 28
+            radius: 6
+            color: "#2a1d0c"
+            border.color: Tema.aviso
+            RowLayout {
+                id: aviso
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 14
+                Text {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: Tema.texto
+                    font.pixelSize: 13
+                    text: Tema.t("instUpdateRebuild")
+                }
+                BotonSecundario {
+                    text: Tema.t("instUpdateRebuildRun")
+                    onClicked: root.maintenance("tools,fetch,configure,recomp,sync,build")
+                }
+            }
+        }
+
         Text {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap

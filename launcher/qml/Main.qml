@@ -60,6 +60,7 @@ ApplicationWindow {
         property int ultimaSesion: 0
         property string portada: ""
         property string teclas: "" // key map as JSON (empty = default layout)
+        property string mando: "" // controller layout as JSON (empty = the fixed layout of controlesDmc5)
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
         property string textoJuego: "" // game language: a "language" of installer.languages() (e.g. "en", "pt-BR"); empty = ask
         property real portadaFoco: 0.55
@@ -81,6 +82,24 @@ ApplicationWindow {
     property var idiomasJuego: installer.languages()
     property string ejecutableJuego: installer.runnerPath()
     readonly property bool listo: ejecutableJuego.length > 0 && idiomasJuego.length > 0
+    // gow-native-pc: launcher updates (GitHub Releases, tools/pipeline/update.ps1). A newer release than this launcher is
+    // offered under the version in the side bar.
+    property var actualizacion: null
+    function versionMayor(a, b) {
+        var x = String(a).split("."), y = String(b).split(".")
+        for (var i = 0; i < Math.max(x.length, y.length); ++i) {
+            var p = parseInt(x[i] || "0"), q = parseInt(y[i] || "0")
+            if (p !== q) return p > q
+        }
+        return false
+    }
+    Connections {
+        target: installer
+        function onUpdateChecked(info) {
+            if (info && !info.error && ventana.versionMayor(info.version, Qt.application.version))
+                ventana.actualizacion = info
+        }
+    }
     function refrescarInstalacion() {
         idiomasJuego = installer.languages()
         ejecutableJuego = installer.runnerPath()
@@ -154,6 +173,7 @@ ApplicationWindow {
         ajustes.saltarVideos = true
         ajustes.arranqueRapido = false
         ajustes.controlesDmc5 = true
+        ajustes.mando = ""
         ajustes.cancelarAnimaciones = true
         ajustes.escSalir = false
         ajustes.minimizarAlJugar = true
@@ -197,6 +217,7 @@ ApplicationWindow {
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
+            mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",
             trucos: ajustes.trucos, idioma: Tema.idioma, textoJuego: ajustes.textoJuego
         }
         if (lanzador.iniciar(a) && ajustes.minimizarAlJugar)
@@ -253,6 +274,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        installer.checkUpdate() // a newer release on GitHub -> offered in the side bar
         // Settings version 2. Fast boot used to be on by default and ends the intro animation when the level
         // loads, which shortened the opening; it is turned off once.
         if (ajustes.versionAjustes < 2) {
@@ -489,6 +511,23 @@ ApplicationWindow {
                         font.pixelSize: 11
                         Layout.fillWidth: true
                         elide: Text.ElideRight
+                    }
+                    Text {
+                        visible: ventana.actualizacion !== null
+                        text: ventana.actualizacion ? "⬆  " + Tema.tf("actualizarA", ventana.actualizacion.version) : ""
+                        color: zonaActualizar.containsMouse ? Tema.oroClaro : Tema.oro
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                        font.underline: zonaActualizar.containsMouse
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        MouseArea {
+                            id: zonaActualizar
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: dialogoActualizar.open()
+                        }
                     }
                 }
             }
@@ -1143,6 +1182,48 @@ ApplicationWindow {
                     text: Tema.t("entendido")
                     onClicked: dialogoError.close()
                 }
+            }
+        }
+    }
+
+    Popup {
+        id: dialogoActualizar
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: 520
+        modal: true
+        padding: 24
+        background: Rectangle { color: "#14161b"; radius: 8; border.width: 1; border.color: Tema.oro }
+        contentItem: ColumnLayout {
+            spacing: 14
+            Text {
+                text: ventana.actualizacion ? Tema.tf("actualizarTitulo", ventana.actualizacion.version) : ""
+                color: Tema.oroClaro
+                font.pixelSize: 18
+                font.weight: Font.Bold
+            }
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Tema.textoSuave
+                font.pixelSize: 13
+                text: lanzador.jugando ? Tema.t("actualizarJugando")
+                    : (ventana.actualizacion && ventana.actualizacion.url ? Tema.t("actualizarDesc") : Tema.t("actualizarSinZip"))
+            }
+            RowLayout {
+                spacing: 10
+                BotonSecundario {
+                    text: Tema.t("actualizarAhora")
+                    visible: ventana.actualizacion && ventana.actualizacion.url
+                    enabled: !lanzador.jugando && !installer.running
+                    onClicked: installer.applyUpdate(ventana.actualizacion.url, ventana.actualizacion.sha256, ventana.actualizacion.version)
+                }
+                BotonSecundario {
+                    text: Tema.t("actualizarNovedades")
+                    onClicked: Qt.openUrlExternally(ventana.actualizacion.page)
+                }
+                Item { Layout.fillWidth: true }
+                BotonSecundario { text: Tema.t("instCancel"); onClicked: dialogoActualizar.close() }
             }
         }
     }
