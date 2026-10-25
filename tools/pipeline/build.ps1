@@ -24,9 +24,9 @@
 # -Pdb: Release with debug information (ps2EntryRunner.pdb) for profilers; the optimised code is the same
 # -Codegen locals (default): recomp stage with register-locals code generation (engine/patches/08, ~22 % less EE
 #        thread time); -Codegen classic generates the code as before patch 08
-# -Toolchain msvc|clang: the C++ compiler. msvc = Visual Studio Build Tools (cl.exe, 45-60 min for a full build);
-#        clang = llvm-mingw (downloaded once into data\_tools, no Visual Studio needed for the game, ~15 min, static
-#        exe; needs engine/patches/12). clang builds go to <build root>-clang, so switching keeps both. The choice is
+# -Toolchain clang|msvc: the C++ compiler. clang (the default) = llvm-mingw (downloaded once into data\_tools, no
+#        Visual Studio needed, ~15 min for a full build, static exe; needs engine/patches/12); msvc = Visual Studio Build
+#        Tools (cl.exe, 45-60 min). clang builds go to <build root>-clang, so switching keeps both. The choice is
 #        remembered in data\toolchain.txt (the launcher's runs use it too). With data\<game>\pgo\gow.profdata (the pgo
 #        stage) clang builds are profile-guided.
 param(
@@ -103,10 +103,10 @@ if (-not $BuildRoot) {
     New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
     [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
 }
-# the compiler: -Toolchain, else the one this copy used last (data\toolchain.txt), else msvc
+# the compiler: -Toolchain, else the one this copy used last (data\toolchain.txt), else clang
 $toolchainFile = Join-Path $root 'data\toolchain.txt'
 if (-not $Toolchain -and (Test-Path $toolchainFile)) { $Toolchain = (Get-Content $toolchainFile -Raw).Trim() }
-if ($Toolchain -notin @('msvc', 'clang')) { $Toolchain = 'msvc' }
+if ($Toolchain -notin @('msvc', 'clang')) { $Toolchain = 'clang' }
 [IO.File]::WriteAllText($toolchainFile, $Toolchain)
 $bld = if ($Config -eq 'Release') { $BuildRoot } else { "$BuildRoot-dev" }   # Ninja is single-config: one folder each
 if ($Toolchain -eq 'clang') { $bld += '-clang' }   # CMake cannot change the compiler of a configured folder

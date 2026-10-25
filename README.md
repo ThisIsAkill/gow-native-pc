@@ -62,7 +62,7 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches).
 | RAM | 8 GB (16 GB recommended while building) |
 | GPU | OpenGL 4.3+ |
 | Disk | ~25 GB free (extracted disc + build) |
-| Tools | [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with C++"), [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/) |
+| Tools | [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/); the C++ compiler (clang, llvm-mingw) is downloaded by the first build. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) only for `-Toolchain msvc` or to build the launcher yourself |
 | Game | Your **God of War (NTSC-U, SCUS-97399)** ISO or a recognised translation |
 
 ## Getting started
@@ -83,18 +83,19 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches).
    1. install anything missing under **Requirements**;
    2. **Download runtime**;
    3. **Add ISO…** (one or more);
-   4. **Install and build** — the first build takes 20-60 minutes depending on the CPU; with "Optimize for 60 fps"
-      the game plays itself for 4 minutes at the end (do not touch it).
+   4. **Install and build** — the first build takes about 15-30 minutes depending on the CPU (it downloads the clang
+      compiler, llvm-mingw, once); with "Optimize for 60 fps" the game plays itself for 4 minutes and is compiled again
+      at the end (do not touch it).
 3. **PLAY**. **Other → Game text** switches the language.
 
 From a terminal: `build.cmd -Discs "D:\God of War (USA).iso"` (examples in [`build.cmd`](build.cmd)).
 
-Faster builds with clang (experimental, 2026-10-25): `build.cmd -Toolchain clang -Stages configure,recomp,sync,build`
-downloads [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) once into `data\_tools` and builds in about 15 minutes
-instead of 45-60 (no Visual Studio needed for the game itself). `build.cmd -Stages pgo` then lets an instrumented copy
-play the ship for a few minutes and rebuilds the game with that profile (profile-guided optimisation: on machine A
-combat 59.4 fps average / 57.9 minimum against 58.0 / 53.1 with MSVC). The choice is remembered in
-`data\toolchain.txt`; `-Toolchain msvc` switches back (each compiler keeps its own build folder).
+Compiler: clang ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw), downloaded once into `data\_tools`) is the
+default since 2026-10-25: about 15 minutes for a full build instead of 45-60 with Visual Studio, and no Visual Studio
+needed for the game. `build.cmd -Toolchain msvc` builds with the Visual Studio Build Tools instead; the choice is
+remembered in `data\toolchain.txt` and each compiler keeps its own build folder. `build.cmd -Stages pgo` lets an
+instrumented copy play the ship for a few minutes and rebuilds the game with that profile (profile-guided optimisation:
+on machine A combat 59.4 fps average / 57.9 minimum against 58.0 / 53.1 with MSVC).
 
 ## Performance
 

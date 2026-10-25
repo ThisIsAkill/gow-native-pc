@@ -79,12 +79,20 @@ QString InstallerBackend::buildRoot() const
     return QStringLiteral("C:/gow-build");
 }
 
+// build.ps1's compiler for this copy (data/toolchain.txt; clang when nothing was built yet)
+static QString toolchainOf(const QString &root)
+{
+    QFile file(root + QStringLiteral("/data/toolchain.txt"));
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(file.readAll()).trimmed() == QStringLiteral("msvc"))
+        return QStringLiteral("msvc");
+    return QStringLiteral("clang");
+}
+
 QString InstallerBackend::runnerPath() const
 {
-    // build.ps1 -Toolchain clang builds in <build root>-clang and records the choice in data/toolchain.txt
+    // clang builds go to <build root>-clang (build.ps1)
     QString folder = buildRoot();
-    QFile toolchain(m_root + QStringLiteral("/data/toolchain.txt"));
-    if (toolchain.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(toolchain.readAll()).trimmed() == QStringLiteral("clang"))
+    if (toolchainOf(m_root) == QStringLiteral("clang"))
         folder += QStringLiteral("-clang");
     const QString exe = folder + QStringLiteral("/ps2xRuntime/ps2EntryRunner.exe");
     return QFileInfo::exists(exe) ? exe : QString();
@@ -97,7 +105,8 @@ QVariantMap InstallerBackend::environment() const
     return {
         {QStringLiteral("git"), onPath(QStringLiteral("git"))},
         {QStringLiteral("python"), !workingPython().isEmpty()},
-        {QStringLiteral("buildTools"), QFileInfo::exists(vswhere)},
+        // clang (llvm-mingw) is downloaded by the first build; only a copy switched to MSVC needs the Build Tools
+        {QStringLiteral("buildTools"), toolchainOf(m_root) == QStringLiteral("clang") || QFileInfo::exists(vswhere)},
         {QStringLiteral("runtime"), QFileInfo::exists(runtimeDir + QStringLiteral("/PS2Recomp/CMakeLists.txt"))},
         {QStringLiteral("game"), !runnerPath().isEmpty()},
         {QStringLiteral("discs"), !languages().isEmpty()},

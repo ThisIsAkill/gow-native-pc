@@ -237,7 +237,7 @@ var tabla = {
     textoJuegoDesc: { tr: "Hangi diskin oynanacağı: Kurulum sekmesinde eklenen her dil burada görünür.", en: "Which prepared disc runs: every language added in the Install tab appears here.", es: "Qué disco preparado se juega: cada idioma añadido en la pestaña Instalación aparece aquí.", pt: "Qual disco preparado roda: cada idioma adicionado na aba Instalação aparece aqui." },
     pestInstalar: { en: "Install", es: "Instalación", pt: "Instalação" },
     instRequirements: { en: "Requirements", es: "Requisitos", pt: "Requisitos" },
-    instBuildTools: { en: "Visual Studio Build Tools (C++ compiler)", es: "Visual Studio Build Tools (compilador C++)", pt: "Visual Studio Build Tools (compilador C++)" },
+    instBuildTools: { en: "C++ compiler (clang, downloaded by the first build)", es: "Compilador C++ (clang, se descarga en la primera compilación)", pt: "Compilador C++ (clang, baixado na primeira compilação)" },
     instDownload: { en: "Download", es: "Descargar", pt: "Baixar" },
     instRuntime: { en: "Native runtime (PS2Recomp)", es: "Runtime nativo (PS2Recomp)", pt: "Runtime nativo (PS2Recomp)" },
     instRuntimeDesc: { en: "Required: the recompiler and native PS2 runtime (PS2Recomp by ran-j, extended by Waffle565, KIexster and the Tobiichi port). It is downloaded, not included.", es: "Obligatorio: el recompilador y el runtime nativo de PS2 (PS2Recomp de ran-j, ampliado por Waffle565, KIexster y el port Tobiichi). Se descarga, no viene incluido.", pt: "Obrigatório: o recompilador e o runtime nativo de PS2 (PS2Recomp de ran-j, ampliado por Waffle565, KIexster e o port Tobiichi). É baixado, não vem incluído." },

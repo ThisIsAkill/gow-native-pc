@@ -62,7 +62,7 @@ Waffle565 e KIexster), e aplica [`engine/patches`](engine/patches).
 | Memória | 8 GB (16 GB recomendado para compilar) |
 | Placa de vídeo | OpenGL 4.3+ |
 | Disco | ~25 GB livres (disco extraído + compilação) |
-| Ferramentas | [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desenvolvimento para desktop com C++"), [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/) |
+| Ferramentas | [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/); o compilador C++ (clang, llvm-mingw) é baixado pela primeira compilação. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) só para `-Toolchain msvc` ou para compilar o launcher |
 | Jogo | Sua ISO de **God of War (NTSC-U, SCUS-97399)** ou uma tradução reconhecida |
 
 ## Como usar
@@ -84,8 +84,9 @@ Waffle565 e KIexster), e aplica [`engine/patches`](engine/patches).
    1. instale o que faltar em **Requisitos**;
    2. **Baixar runtime**;
    3. **Adicionar ISO…** (uma ou mais);
-   4. **Instalar e compilar** — a primeira vez leva de 20 a 60 minutos, conforme o processador; com "Otimizar para
-      60 fps" o jogo abre sozinho por 4 minutos no fim (não mexa).
+   4. **Instalar e compilar** — a primeira vez leva cerca de 15 a 30 minutos, conforme o processador (baixa uma vez o
+      compilador clang, llvm-mingw); com "Otimizar para 60 fps" o jogo abre sozinho por 4 minutos e é compilado de novo
+      no fim (não mexa).
 3. **JOGAR**. Em **Outros → Idioma do jogo** você troca o idioma.
 
 Pelo terminal: `build.cmd -Discs "D:\God of War (USA).iso"` (exemplos no [`build.cmd`](build.cmd)).
