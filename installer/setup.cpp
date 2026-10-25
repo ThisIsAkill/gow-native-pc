@@ -57,6 +57,7 @@ constexpr size_t kBlock = 16u << 20;
 const wchar_t *const kProduct = L"God of War Native PC";
 const wchar_t *const kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gow-native-pc";
 const wchar_t *const kLauncher = L"launcher\\bin\\gow-launcher.exe";
+const wchar_t *const kFolderLink = L"God of War Launcher.lnk"; // same name as the launcher stage's shortcut in a checkout
 const wchar_t *const kRepoUrl = L"https://github.com/Vnnc1/gow-native-pc";
 
 std::wstring selfPath()
@@ -276,7 +277,7 @@ State g_state = State::Ready;
 bool g_uninstall = false;      // this run removes an installation
 std::wstring g_dir;            // install folder
 bool g_existing = false;       // g_dir already holds an installation
-bool g_toggle = true;          // desktop shortcut / keep game data
+bool g_toggle = false;         // desktop shortcut (off unless the user turns it on) / keep game data (on)
 std::wstring g_message;        // Failed / UninstallDone text
 std::wstring g_file;           // file being written
 int g_target = 0, g_shown = 0; // progress in 1/1000 (worker target, eased display)
@@ -455,6 +456,7 @@ void installWorker(std::wstring dir, bool desktop)
     }
     const std::wstring launcher = dir + L"\\" + kLauncher, launcherDir = dir + L"\\launcher\\bin";
     shortcut(startMenuLink(), launcher, launcherDir);
+    shortcut(dir + L"\\" + kFolderLink, launcher, launcherDir); // in the install folder, next to uninstall.exe
     if (desktop)
         shortcut(desktopLink(), launcher, launcherDir);
     else
@@ -515,6 +517,7 @@ void removeWorker(std::wstring dir, bool keep)
         RemoveDirectoryW(d.c_str()); // only empty ones
     DeleteFileW((dir + L"\\uninstall.lst").c_str());
     DeleteFileW((dir + L"\\uninstall.exe").c_str());
+    DeleteFileW((dir + L"\\" + kFolderLink).c_str());
     std::error_code ec;
     if (!keep)
     {
@@ -1031,7 +1034,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
     }
 
     std::wstring selfToDelete;
-    if (argc >= 2 && _wcsicmp(argv[1], L"/uninstall") == 0)
+    // uninstall.exe is this program without the package: opened by hand (double-click in the install folder) it
+    // removes that installation instead of reporting a damaged installer
+    const std::wstring ownDir = fs::path(selfPath()).parent_path().wstring();
+    bool bareInInstall = false;
+    if (argc == 1 && isInstall(ownDir) && exists(ownDir + L"\\uninstall.lst"))
+    {
+        std::vector<uint8_t> self;
+        Footer f{};
+        bareInInstall = readAll(selfPath(), self) && !footerOf(self, f);
+    }
+    if ((argc >= 2 && _wcsicmp(argv[1], L"/uninstall") == 0) || bareInInstall)
     {
         // run from a copy in %TEMP% so this exe and its folder can be removed
         const std::wstring self = selfPath();
@@ -1048,7 +1061,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
         g_uninstall = true;
         g_dir = argv[2];
         g_state = State::UninstallReady;
-        g_toggle = true; // keep game data
+        g_toggle = true; // keep game data unless the user turns it off
         selfToDelete = selfPath();
     }
     else
