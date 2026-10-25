@@ -290,7 +290,8 @@ if ($Stages -contains 'package') {
     $stage = Join-Path $root 'data\_package\gow-native-pc'
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force (Join-Path $stage 'launcher\bin') | Out-Null
-    Get-ChildItem $lb | Where-Object { $_.Name -notmatch '^(CMakeFiles|\.ninja.*|build\.ninja|CMakeCache\.txt|cmake_install\.cmake|.*_autogen|.*\.qmltypes|qmltypes|.rcc|meta_types)$' } |
+    # build outputs only: the QML module folder (Tobiichi/) is compiled into the exe, .exp/.lib/.cpp are link leftovers
+    Get-ChildItem $lb | Where-Object { $_.Name -notmatch '^(CMakeFiles|\.ninja.*|\.qt|build\.ninja|CMakeCache\.txt|cmake_install\.cmake|.*_autogen|.*\.qmltypes|qmltypes|\.rcc|meta_types|Tobiichi|.*\.exp|.*\.lib|.*\.cpp|.*\.pdb|.*\.ilk)$' } |
         Copy-Item -Destination (Join-Path $stage 'launcher\bin') -Recurse -Force
     foreach ($item in @('README.md', 'README.pt-BR.md', 'CREDITS.md', 'LICENSE', 'AGENTS.md', 'CLAUDE.md', 'build.cmd', 'docs', 'games', 'tools')) {
         Copy-Item (Join-Path $root $item) $stage -Recurse -Force
