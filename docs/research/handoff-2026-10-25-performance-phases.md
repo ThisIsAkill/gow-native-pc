@@ -173,7 +173,68 @@ wrong channels. Suspects are the GS hardware backend's channel-shuffle / CLUT / 
 4. Optional: let the release ship without Visual Studio. The launcher still needs MSVC Qt; a mingw Qt build
    (`win64_llvm_mingw`) would remove the last VS dependency.
 
-### B. Phase 3: VU1 static timing (large, the main FPS lever)
+### Result of the phase 3 / 5 attempt (2026-10-25, later the same day): small gain, not the lever
+
+- **What was built.** Done in the test tree `C:\gow-src-locals`; not a patch yet. Exact equality was checked with the
+  replay workbench below and with `GOW_VU1N_VERIFY` (2000 runs, 0 mismatches).
+  1. **Lane masks inside the dispatch slot.** No pointer to a separate table any more.
+  2. **Block chaining.** Each generated block ends with `VU1NativeAccess::chain(n, next)`, which does `runNative`'s
+     exit and entry bookkeeping. The block then jumps to the next one with a guaranteed tail call
+     (`[[clang::musttail]]`). Self-loops jump to themselves. Without musttail the jump is a nested call and was 13 %
+     slower, so chaining is off on MSVC. `GOW_VU1N_CHAIN=0/1` switches it.
+- **Measured (replay median of 4 runs, ±3 % noise):** original 1256 ms, lanes 1279 ms, chaining 1231 ms (−2 %).
+  In-game combat VU1 worker: 3627 → 3593 ms busy per 5 s (−1 %).
+- **Why so little.** The sampling profiler showed ~40 % of VU1 time in the dispatch loop. That was an artefact of
+  thread-suspension sampling, which piles samples up around calls and returns. Removing the dispatch loop did not remove
+  that time.
+  - The real cost is the generated arithmetic: about 20 instructions per VU pair, already tight.
+  - It runs as serial dependency chains (MADDA/MADD accumulating in ACC, then clamp), which are serial on the PS2 too.
+  - Self-loops are 11 % of block executions and 28 % of pairs (diag counters `selfBlocks` / `selfPairs`). Jumping to
+    themselves did not make them faster for the same reason.
+- **Workbench.** Use it for any future VU1 change:
+  - `GOW_VU1N_RECORD=<file> GOW_VU1N_RECORD_N=4000 GOW_VU1N_RECORD_STRIDE=101 GOW_VU1N_RECORD_SKIP=3000000` records
+    combat VU1 programs. The file is local only: it is game data.
+  - `GOW_VU1N_REPLAY=<file> GOW_VU1N_REPLAY_REPS=31` replays them, checks bit-exactness and times the warm runs (the
+    warm repeats skip the result hash).
+  - Always compare medians of several alternating runs, on an idle machine.
+- **Where the next real gains probably are** (not measured yet):
+  - **Run independent VU1 work in parallel.** Today one worker runs all programs in order; the hardware ran VU1 while
+    the EE prepared the next packet. Overlapping the per-frame EE work (~3 ms) with the VU1 job (~13 ms) attacks the
+    frame's critical path directly.
+  - **Cut non-block VU1 worker costs.** Profile the in-game VU1 thread: VIF unpack, XGKICK/GS packet path, locks.
+  - **Cheaper FMAC exactness checks** in the generated code: the `madd` slow-path test on every pair.
+
+### Parallel VU1: what the frame looks like (measured 2026-10-25, MSVC build, ship combat)
+
+- **The timeline.** `PS2X_GS_WORKER_TRACE=<s>` prints kick/job-start/job-done/gs-irq of the GS/VU1 worker, plus
+  entry/return of `vid::Flip` 0x1837B8, `vid::WaitForDMAComplete` 0x183878 and 0x13F730.
+  - The trace only sees indirect dispatches; direct calls between recompiled functions are not traced.
+  - The test tree also marks `ee-wait` / `ee-pace` / `ee-run` (EeScheduler::waitForEvent / pacing).
+  - Read it on an MSVC build: on the llvm-mingw build every stderr write takes milliseconds and distorts it. Normal
+    play writes almost nothing, so this is not a play-time cost.
+- **One frame (~17.5 ms, ~57 fps):**
+  1. The worker runs one large VIF1 job (~1.6 MB: unpack + VU1 programs + XGKICK into the GS stage) in **~14 ms**.
+     It ends with GS FINISH, which raises gs-irq 2.
+  2. The EE runs the game logic during that job (already overlapped), then waits for the FINISH interrupt.
+  3. Then it does 0x13F730 → a small 1272-byte job → WaitForDMAComplete → Flip → 0x13F730 → kicks the next large job.
+     The worker is idle for that **~3.5 ms**.
+  4. The EE waits on worker sync points almost never (`PS2X_GS_WORKER_DIAG=1`: 1 wait in 1483 syncs).
+- **Splitting the VU1 job across threads does not fit.** Each VU1 program starts from the state the previous one left
+  (VF/VI registers, constants in VU memory).
+- **The lever is the ~3.5 ms serial gap.** Let the game start frame N+1 while the worker finishes frame N. Two
+  coordinated changes, both opt-in until proven:
+  1. **Order the display writes.** GS privileged display writes from the EE (DISPFB1/2, DISPLAY1/2, PMODE in Flip) go
+     through the worker queue in order with the GIF stream. Then the host's presentation request
+     (`GS::latchHostPresentationFrame`, built from `m_privRegs` at each host vsync) never points at a buffer whose draws
+     are not queued yet. Today only the game's FINISH wait guarantees that.
+  2. **Early FINISH.** Signal FINISH for the frame's large job when it is queued, not when the GS stream reaches it,
+     and suppress the real one at the end of that job so the game does not see it twice.
+  - **Risks:** half-drawn frames if step 1 misses a path; the game's interrupt bookkeeping (it may count FINISH or
+    check SIGNAL/LABEL); readbacks (the EE reading GS/VU memory still being written: `needsGsWorkerSync` sites cover
+    MMIO reads).
+  - **Expected gain:** up to ~3.5 ms per VU1-bound frame, which is ship combat 55 → 60 fps on machine A.
+
+### B. Phase 3: VU1 static timing (large; see the result above before starting)
 
 - **Today:**
   - The native VU1 backend (`vu1n_gen.py`, runtime `ps2_vu1_native.inl`, `ps2_vu1_native.h`) runs straight-line blocks

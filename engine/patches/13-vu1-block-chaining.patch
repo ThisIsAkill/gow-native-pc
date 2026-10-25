@@ -1,0 +1,341 @@
+Native VU1: blocks chain to their successor (phase 3/5 attempt), lane masks in the dispatch slot, replay workbench.
+- Every generated block (tools/vu1/vu1n_gen.py) ends with VU1NativeAccess::chain(n, next): runNative's bookkeeping after
+  the block (timing history, FDIV/EFU commit, counters, pc) and, when the successor needs nothing runNative handles itself
+  (miss, entry lane check, budget, stop, verify bisection), its entry bookkeeping too; the block then jumps to it with a
+  guaranteed tail call ([[clang::musttail]]). Self-loops jump to themselves. The order of every state change is the same
+  as in the dispatch loop; a block returns next | kVu1nDone when it does not chain. MSVC has no guaranteed tail call (the
+  jump becomes a nested call: 13 % slower), so chaining is on with clang only; GOW_VU1N_CHAIN=0/1 overrides.
+- The clean-operand masks of patch 10 are copied into the dispatch slot (no pointer to a table in the generated code).
+- Diagnostics: GOW_VU1N_DIAG prints selfBlocks / selfPairs (blocks that branched back to themselves: 11 % of the block
+  executions, 28 % of the pairs in ship combat). GOW_VU1N_REPLAY_REPS: the warm repetitions skip the result hash, so a
+  profile of the replay shows the VU1 work.
+Measured: 4000 recorded combat programs replayed (GOW_VU1N_RECORD / REPLAY), bit-identical; median of 4 alternating runs
+1256 ms (before) -> 1231 ms (-2 %, noise +-3 %); in-game combat VU1 worker 3627 -> 3593 ms busy per 5 s;
+GOW_VU1N_VERIFY 2000 runs, 0 mismatches. A small gain: the VU1 time is in the blocks' arithmetic (serial MADD chains on
+ACC), not in the dispatch (the sampling profiler's ~40 % there was an artefact of thread-suspension sampling).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 715774b..37d021a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -85,12 +85,31 @@ struct VU1NativeCtx
+     uint64_t start = 0;           // exact-engine cycle at which the running block's pair 0 issues
+     VU1FlagRing *macRing = nullptr, *clipRing = nullptr;
+     VU1FlagTail *tail = nullptr; // the running block's tail record (blocks with a VU1TailDesc)
++    // gow-native-pc: block chaining (VU1NativeAccess::chain). The running block's dispatch state, so the block that ends
++    // it can do runNative's bookkeeping itself and jump straight to the next block.
++    void *slot = nullptr;        // VU1Interpreter::NativeState::Slot of the running block
++    uint32_t pc = 0, cycId = 0, depth = 0;
++    bool chain = false;          // chaining allowed in this run (off while bisecting, GOW_VU1N_CHAIN=0)
++    uint64_t known0 = 0xFu, known1 = 0u; // clean VF lanes along the blocks run (see runNative)
++    uint64_t blocks = 0, pairs = 0;      // diagnostics, added to NativeState on exit
+ };
+ 
+ // Return value of a native block: next pc in the low 16 bits; kEnded when the program finished; kBail when the exact
+ // engine must continue at the returned pc (D/T halt enabled, ...).
+ constexpr uint32_t kVu1nEnded = 0x80000000u;
+ constexpr uint32_t kVu1nBail = 0x40000000u;
++// gow-native-pc: the block's exit bookkeeping was done by VU1NativeAccess::chain (runNative must not repeat it)
++constexpr uint32_t kVu1nDone = 0x20000000u;
++// gow-native-pc: a chained block jumps to the next one (a guaranteed tail call). Without it the jump is a nested call: every
++// chained block keeps its frame until runNative takes over, which was slower than the dispatch loop (MSVC has no such
++// attribute: chaining is off there unless GOW_VU1N_CHAIN=1).
++#if defined(__clang__)
++#define VU1N_MUSTTAIL [[clang::musttail]]
++#define VU1N_CHAIN_DEFAULT true
++#else
++#define VU1N_MUSTTAIL
++#define VU1N_CHAIN_DEFAULT false
++#endif
+ using VU1NativeFn = uint32_t (*)(VU1NativeCtx &);
+ 
+ // Registered by the generated tables: key = FNV-1a over (pc, block words), see vu1n::blockKey. pairs: block length in the
+@@ -142,7 +161,10 @@ struct VU1Interpreter::NativeState
+         const uint8_t *idle = nullptr;
+         BlockTiming *bt = nullptr;
+         const VU1TailDesc *tail = nullptr;
+-        const VU1NativeLanes *lanes = nullptr; // clean-operand assumption and effect (null: assumes nothing, keeps nothing)
++        // gow-native-pc: clean-operand masks copied from the block's VU1NativeLanes (a block without them: all zero, i.e.
++        // assumes nothing and keeps nothing), so the dispatch loop reads no table outside the slot. req here, gen / keep in
++        // the second line.
++        uint64_t laneReq[2] = {};
+         uint16_t pairs = 0;
+         uint16_t idleEnd = 0; // idle[pairs - 1] + 1: the block's length in cycles with an idle pipeline
+         bool known = false;
+@@ -156,6 +178,7 @@ struct VU1Interpreter::NativeState
+         alignas(64) const BlockTiming *memoPred = nullptr;
+         const uint8_t *memoCyc = nullptr;
+         uint32_t memoPredId = 0, memoId = 0;
++        uint64_t laneGen[2] = {}, laneKeep[2] = {};
+     };
+     static_assert(sizeof(Slot) == 128);
+     static constexpr uint8_t kScalarMany = 0xFF;
+@@ -178,10 +201,12 @@ struct VU1Interpreter::NativeState
+     FlagRing macRing, clipRing;
+     bool flagsInRings = false; // the rings hold the flag state (set at native entry, cleared when the exact engine continues)
+     bool enabled = std::getenv("GOW_VU1_NATIVE_OFF") == nullptr;
++    bool chain = [] { const char *v = std::getenv("GOW_VU1N_CHAIN"); return v ? v[0] != '0' : VU1N_CHAIN_DEFAULT; }();
+     unsigned verifyLeft = std::getenv("GOW_VU1N_VERIFY") ? static_cast<unsigned>(std::atoi(std::getenv("GOW_VU1N_VERIFY"))) : 0u;
+     bool diag = std::getenv("GOW_VU1N_DIAG") != nullptr;
+     unsigned long long nativePairs = 0, nativeBlocks = 0, missBlocks = 0, nativeRuns = 0, codeChanges = 0, slotSetups = 0;
+     unsigned long long laneChecks = 0, laneFails = 0; // gow-native-pc: clean-operand entry checks run / failed
++    unsigned long long selfBlocks = 0, selfPairs = 0;  // gow-native-pc: blocks that branched back to themselves (diag)
+     std::unordered_map<uint32_t, unsigned> missPcs, missHits;
+     unsigned limit = ~0u, count = 0; // verify bisection: native blocks allowed in this run
+     VU1State snap;                   // state on entry of block number `limit` (verify bisection)
+@@ -222,6 +247,12 @@ struct VU1NativeAccess
+     static void syncInflight(VU1Interpreter &vu);
+     static void finishBlockTiming(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, const uint8_t *cyc, uint32_t cycId,
+                                   uint64_t start);
++    // gow-native-pc: called by a native block at its normal exit (next = its successor pc). Does runNative's bookkeeping
++    // after the block, then, if the successor can run without anything runNative handles (miss, entry lane check, budget,
++    // stop, bisection, depth limit), its entry bookkeeping too, and returns its slot: the block jumps to it directly (one
++    // indirect jump per block exit instead of one shared one in the dispatch loop). nullptr: the block returns
++    // next | kVu1nDone and runNative continues from there.
++    static VU1Interpreter::NativeState::Slot *chain(VU1NativeCtx &n, uint32_t next);
+     static void callLower(VU1NativeCtx &n, uint32_t pc, uint32_t lower, uint32_t upper);
+     static void callUpper(VU1NativeCtx &n, uint32_t pc, uint32_t upper);
+     static void xgkick(VU1NativeCtx &n, uint32_t qwordAddress);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 2b8d9bf..401d9f0 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -773,7 +773,9 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+                 sl.readsEntryFlags = bt.readsEntryFlags;
+                 sl.memoable = bt.scalarRead == 0u;
+                 sl.tail = it->second.tail;
+-                sl.lanes = it->second.lanes;
++                if (const VU1NativeLanes *lz = it->second.lanes)
++                    for (uint32_t w = 0; w < 2u; ++w)
++                        sl.laneReq[w] = lz->req[w], sl.laneGen[w] = lz->gen[w], sl.laneKeep[w] = lz->keep[w];
+                 if (bt.scalarPairs.size() > std::size(sl.scalar))
+                     sl.scalarCount = VU1Interpreter::NativeState::kScalarMany;
+                 else
+@@ -813,6 +815,64 @@ void VU1NativeAccess::recordMissHead(uint32_t pc)
+     }
+ }
+ 
++// gow-native-pc: block chaining, see the declaration. The exit half is runNative's code after a block, the entry half its
++// code before one; the entry half changes nothing until every condition runNative would handle itself has passed.
++VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint32_t next)
++{
++    using NS = VU1Interpreter::NativeState;
++    VU1Interpreter &vu = *n.vu;
++    NS &ns = *vu.m_native;
++    const NS::Slot &cur = *static_cast<const NS::Slot *>(n.slot);
++    finishBlockTiming(vu, cur, n.cyc, n.cycId, n.start);
++    if (vu.m_cycle >= vu.m_nextCommitCycle)
++        commitDue(vu);
++    n.pairs += cur.pairs;
++    ++n.blocks;
++    if (ns.diag && (next & 0x3FF8u) == n.pc)
++        ++ns.selfBlocks, ns.selfPairs += cur.pairs;
++    vu.m_state.pc = next & 0x3FFFu;
++    // with a guaranteed tail call (clang, VU1N_MUSTTAIL) the chain uses no stack; otherwise (MSVC with GOW_VU1N_CHAIN=1)
++    // each chained block keeps its frame and runNative takes over every 64 blocks
++#if defined(__clang__)
++    constexpr uint32_t kMaxDepth = 4096u;
++#else
++    constexpr uint32_t kMaxDepth = 64u;
++#endif
++    if (!n.chain || n.depth >= kMaxDepth)
++        return nullptr;
++    const auto &context = *static_cast<const VU1Interpreter::StepContext *>(n.context);
++    if (vu.m_stopRequested || vu.m_cycle >= context.budgetEnd)
++        return nullptr;
++    const uint32_t pc = next & 0x3FF8u;
++    if (pc + 8u > context.codeSize)
++        return nullptr;
++    NS::Slot &sl = ns.slots[pc >> 3];
++    if (!sl.known || !sl.fn)
++        return nullptr;
++    if (((sl.laneReq[0] & ~n.known0) | (sl.laneReq[1] & ~n.known1)) != 0u)
++        return nullptr; // an entry lane check: runNative does it (and counts it)
++    n.known0 = (n.known0 & sl.laneKeep[0]) | sl.laneGen[0] | 0xFu;
++    n.known1 = (n.known1 & sl.laneKeep[1]) | sl.laneGen[1];
++    const uint64_t start = vu.m_cycle;
++    uint32_t cycId = 0u;
++    const uint8_t *cyc = sl.readsEntryFlags ? blockTiming(vu, sl, cycId) : sl.idle;
++    n.cyc = cyc;
++    n.start = start;
++    if (sl.tail)
++    {
++        VU1FlagTail &t = ns.hist[ns.histNext].tail;
++        t.desc = sl.tail;
++        t.cyc = cyc;
++        t.start = start;
++        n.tail = &t;
++    }
++    n.slot = &sl;
++    n.pc = pc;
++    n.cycId = cycId;
++    ++n.depth;
++    return &sl;
++}
++
+ void VU1Interpreter::commitEverythingNow()
+ {
+     const uint64_t keep = m_cycle;
+@@ -855,14 +915,15 @@ bool VU1Interpreter::runNative(StepContext &context)
+     ctx.clipRing = &ns.clipRing;
+ 
+     bool handled = false;
+-    // per-block bookkeeping kept in registers across the block calls (the blocks are opaque calls: anything in memory is
+-    // reloaded after each one): diagnostics counters added to ns on exit, the verify bisection limit fixed for the run
++    // the verify bisection limit is fixed for the run; diagnostics counters (ctx.blocks / pairs) are added to ns on exit
+     const bool bisecting = ns.limit != ~0u;
+-    uint64_t blocks = 0u, pairs = 0u;
+-    // gow-native-pc: VF lanes known to hold no Inf/NaN bits along the blocks run since this native entry (vf00 always).
+-    // A block compiled to read some lanes without normalising them (sl.lanes->req) runs only when they are known or
+-    // checked clean; otherwise the exact engine takes over at that block.
+-    uint64_t known0 = 0xFu, known1 = 0u;
++    // gow-native-pc: blocks chain to their successor themselves (VU1NativeAccess::chain) unless bisecting
++    ctx.chain = ns.chain && !bisecting;
++    // gow-native-pc: VF lanes known to hold no Inf/NaN bits along the blocks run since this native entry (vf00 always),
++    // in ctx.known0/1. A block compiled to read some lanes without normalising them (laneReq) runs only when they are known
++    // or checked clean; otherwise the exact engine takes over at that block.
++    ctx.known0 = 0xFu;
++    ctx.known1 = 0u;
+     for (;;)
+     {
+         if (m_stopRequested || m_cycle >= context.budgetEnd)
+@@ -918,9 +979,8 @@ bool VU1Interpreter::runNative(StepContext &context)
+             ++ns.count;
+             ns.trace.push_back(pc);
+         }
+-        if (const VU1NativeLanes *lz = sl.lanes)
+         {
+-            const uint64_t need0 = lz->req[0] & ~known0, need1 = lz->req[1] & ~known1;
++            const uint64_t need0 = sl.laneReq[0] & ~ctx.known0, need1 = sl.laneReq[1] & ~ctx.known1;
+             if ((need0 | need1) != 0u)
+             {
+                 ++ns.laneChecks;
+@@ -929,16 +989,11 @@ bool VU1Interpreter::runNative(StepContext &context)
+                     ++ns.laneFails;
+                     break;
+                 }
+-                known0 |= need0;
+-                known1 |= need1;
++                ctx.known0 |= need0;
++                ctx.known1 |= need1;
+             }
+-            known0 = (known0 & lz->keep[0]) | lz->gen[0] | 0xFu;
+-            known1 = (known1 & lz->keep[1]) | lz->gen[1];
+-        }
+-        else
+-        {
+-            known0 = 0xFu;
+-            known1 = 0u;
++            ctx.known0 = (ctx.known0 & sl.laneKeep[0]) | sl.laneGen[0] | 0xFu;
++            ctx.known1 = (ctx.known1 & sl.laneKeep[1]) | sl.laneGen[1];
+         }
+         const uint64_t start = m_cycle;
+         // Values never depend on timing, only flag reads do. A block that reads flags written before it gets its exact
+@@ -956,12 +1011,22 @@ bool VU1Interpreter::runNative(StepContext &context)
+             t.start = start;
+             ctx.tail = &t;
+         }
++        ctx.slot = &sl;
++        ctx.pc = pc;
++        ctx.cycId = cycId;
++        ctx.depth = 0u;
+         const uint32_t result = fn(ctx);
+-        VU1NativeAccess::finishBlockTiming(*this, sl, cyc, cycId, start);
++        if (result & kVu1nDone) // chained blocks: every block's exit bookkeeping is done, m_state.pc is the next pc
++            continue;
++        // the last block run (ctx: it may be a chained one) ended the program or bails: its exit here
++        const NativeState::Slot &last = *static_cast<const NativeState::Slot *>(ctx.slot);
++        VU1NativeAccess::finishBlockTiming(*this, last, ctx.cyc, ctx.cycId, ctx.start);
+         if (m_cycle >= m_nextCommitCycle)
+             VU1NativeAccess::commitDue(*this); // FDIV/EFU entries kept for timing retire when ready (values are written already)
+-        pairs += sl.pairs;
+-        ++blocks;
++        ctx.pairs += last.pairs;
++        ++ctx.blocks;
++        if (ns.diag && (result & 0x3FF8u) == ctx.pc)
++            ++ns.selfBlocks, ns.selfPairs += last.pairs;
+         m_state.pc = result & 0x3FFFu;
+         if (result & kVu1nEnded)
+         {
+@@ -972,8 +1037,8 @@ bool VU1Interpreter::runNative(StepContext &context)
+         if (result & kVu1nBail)
+             break;
+     }
+-    ns.nativePairs += pairs;
+-    ns.nativeBlocks += blocks;
++    ns.nativePairs += ctx.pairs;
++    ns.nativeBlocks += ctx.blocks;
+     m_state.cycles = m_cycle; // only read outside the blocks (diagnostics)
+     if (armed)
+     {
+@@ -988,9 +1053,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+         if (std::chrono::steady_clock::now() - last > std::chrono::seconds(5))
+         {
+             last = std::chrono::steady_clock::now();
+-            std::fprintf(stderr, "[vu1n] nativePairs=%llu nativeBlocks=%llu missBlocks=%llu nativeEntries=%llu distinctMissPcs=%zu codeChanges=%llu slotSetups=%llu laneChecks=%llu laneFails=%llu\n",
++            std::fprintf(stderr, "[vu1n] nativePairs=%llu nativeBlocks=%llu missBlocks=%llu nativeEntries=%llu distinctMissPcs=%zu codeChanges=%llu slotSetups=%llu laneChecks=%llu laneFails=%llu selfBlocks=%llu selfPairs=%llu\n",
+                          ns.nativePairs, ns.nativeBlocks, ns.missBlocks, ns.nativeRuns, ns.missPcs.size(), ns.codeChanges, ns.slotSetups,
+-                         ns.laneChecks, ns.laneFails);
++                         ns.laneChecks, ns.laneFails, ns.selfBlocks, ns.selfPairs);
++            ns.selfBlocks = ns.selfPairs = 0;
+             ns.nativePairs = ns.nativeBlocks = ns.missBlocks = ns.nativeRuns = ns.codeChanges = ns.slotSetups = 0;
+             ns.laneChecks = ns.laneFails = 0;
+             std::vector<std::pair<unsigned, uint32_t>> top;
+@@ -1023,6 +1089,7 @@ namespace
+         uint8_t data[16384];
+     };
+     uint64_t g_vu1nReplayNs = 0; // time spent in the native runs of the replay (GOW_VU1N_REPLAY_REPS timing)
++    bool g_vu1nReplayTimingOnly = false; // warm replay repetitions: run only, no result hash (profiles see the VU1 work)
+     inline uint64_t fnvBytes(uint64_t h, const void *p, size_t n)
+     {
+         const uint8_t *b = static_cast<const uint8_t *>(p);
+@@ -1049,6 +1116,12 @@ uint64_t VU1NativeAccess::silentNativeHash(VU1Interpreter &vu, void *contextPtr)
+             break;
+     }
+     g_vu1nReplayNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
++    if (g_vu1nReplayTimingOnly)
++    {
++        g_vuVerifyCapture = false;
++        vu.m_verifySilent = silentBefore;
++        return 0u;
++    }
+     vu.flushPipelines();
+     g_vuVerifyCapture = false;
+     vu.m_verifySilent = silentBefore;
+@@ -1113,7 +1186,9 @@ void VU1NativeAccess::recordReplay(VU1Interpreter &vu, void *contextPtr, uint32_
+                 vu.m_activeVuData = scratch->data;
+                 vu.m_activeVuDataSize = 16384u;
+                 g_vu1nReplayNs = 0;
++                g_vu1nReplayTimingOnly = rep != 0u;
+                 const uint64_t h = silentNativeHash(vu, &c);
++                g_vu1nReplayTimingOnly = false;
+                 if (rep != 0u)
+                     timedNs += g_vu1nReplayNs; // warm block cache only
+                 else if (h != rec->hash && differ++ < 20u)
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index 0fb693f..adb8b92 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -709,12 +709,18 @@ def gen_block(pc0, pairs, tail_out=None, entry=VF0_LANES, req_out=None):
+     if req_out is not None:
+         req_out.append(used[0] & ~VF0_LANES)
+     lines.extend(flush_final(n - 1))
+-    if last_is_branch_block:
+-        lines.append(f"return taken ? target : {end_pc}u;")
+-    elif ebit:
++    if ebit:
+         lines.append(f"return kVu1nEnded | {end_pc}u;")
++        return lines
++    # gow-native-pc: the block does runNative's exit / entry bookkeeping itself and jumps to its successor (VU1NativeAccess::
++    # chain); a jump back to itself is the self-loop case
++    if last_is_branch_block:
++        lines.append(f"const uint32_t next = taken ? target : {end_pc}u;")
+     else:
+-        lines.append(f"return {end_pc}u;")
++        lines.append(f"const uint32_t next = {end_pc}u;")
++    lines.append("if (auto *sl = VU1NativeAccess::chain(n, next))")
++    lines.append("    VU1N_MUSTTAIL return sl->fn(n);")
++    lines.append("return next | kVu1nDone;")
+     return lines
+ 
+ 
