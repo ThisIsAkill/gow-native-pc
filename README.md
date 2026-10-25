@@ -89,6 +89,13 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches).
 
 From a terminal: `build.cmd -Discs "D:\God of War (USA).iso"` (examples in [`build.cmd`](build.cmd)).
 
+Faster builds with clang (experimental, 2026-10-25): `build.cmd -Toolchain clang -Stages configure,recomp,sync,build`
+downloads [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) once into `data\_tools` and builds in about 15 minutes
+instead of 45-60 (no Visual Studio needed for the game itself). `build.cmd -Stages pgo` then lets an instrumented copy
+play the ship for a few minutes and rebuilds the game with that profile (profile-guided optimisation: on machine A
+combat 59.4 fps average / 57.9 minimum against 58.0 / 53.1 with MSVC). The choice is remembered in
+`data\toolchain.txt`; `-Toolchain msvc` switches back (each compiler keeps its own build folder).
+
 ## Performance
 
 The game is capped at 60 frames by design (its logic follows the PS2's 60 Hz VBlank). Measured and reported results on

@@ -42,10 +42,17 @@ def junction(link, target):
     os.makedirs(target, exist_ok=True)
     if os.path.lexists(link):
         return
-    if os.name == 'nt':
-        subprocess.run(['cmd', '/c', 'mklink', '/J', os.path.abspath(link), os.path.abspath(target)], check=True, stdout=subprocess.DEVNULL)
-    else:
-        os.symlink(os.path.abspath(target), link)
+    try:
+        if os.name == 'nt':
+            subprocess.run(['cmd', '/c', 'mklink', '/J', os.path.abspath(link), os.path.abspath(target)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            os.symlink(os.path.abspath(target), link)
+    except (subprocess.CalledProcessError, OSError):
+        # exFAT / FAT32 drives (USB disks) have no folder links: this disc keeps a memory card of its own
+        os.makedirs(link, exist_ok=True)
+        say(f'  {os.path.basename(os.path.dirname(link))}: this drive has no folder links (exFAT/FAT32?), '
+            'so this language keeps its own memory card')
 
 
 def extract(src, dst):

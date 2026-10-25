@@ -8,6 +8,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QStandardPaths>
 #include <QUrl>
 
@@ -32,15 +33,35 @@ namespace
     {
         return !QStandardPaths::findExecutable(program).isEmpty();
     }
+
+    // A Python 3 that really runs: the Microsoft Store's python.exe stub in WindowsApps is on PATH without being a Python
+    // (it only opens the Store), so being on PATH is not enough. "python" first, then the "py" launcher.
+    QString workingPython()
+    {
+        static const QString found = []
+        {
+            for (const QString &candidate : {QStringLiteral("python"), QStringLiteral("py")})
+            {
+                if (!onPath(candidate))
+                    continue;
+                QProcess probe;
+                probe.start(candidate, {QStringLiteral("-c"), QStringLiteral("import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)")});
+                if (probe.waitForFinished(8000) && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0)
+                    return candidate;
+                probe.kill();
+            }
+            return QString();
+        }();
+        return found;
+    }
 }
 
 InstallerBackend::InstallerBackend(QObject *parent) : QObject(parent), m_root(findRoot()) {}
 
 QString InstallerBackend::python() const
 {
-    if (onPath(QStringLiteral("python")))
-        return QStringLiteral("python");
-    return QStringLiteral("py");
+    const QString found = workingPython();
+    return found.isEmpty() ? QStringLiteral("python") : found;
 }
 
 // the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders), chosen
@@ -60,7 +81,12 @@ QString InstallerBackend::buildRoot() const
 
 QString InstallerBackend::runnerPath() const
 {
-    const QString exe = buildRoot() + QStringLiteral("/ps2xRuntime/ps2EntryRunner.exe");
+    // build.ps1 -Toolchain clang builds in <build root>-clang and records the choice in data/toolchain.txt
+    QString folder = buildRoot();
+    QFile toolchain(m_root + QStringLiteral("/data/toolchain.txt"));
+    if (toolchain.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(toolchain.readAll()).trimmed() == QStringLiteral("clang"))
+        folder += QStringLiteral("-clang");
+    const QString exe = folder + QStringLiteral("/ps2xRuntime/ps2EntryRunner.exe");
     return QFileInfo::exists(exe) ? exe : QString();
 }
 
@@ -70,7 +96,7 @@ QVariantMap InstallerBackend::environment() const
     const QString runtimeDir = m_root + QStringLiteral("/engine/runtime");
     return {
         {QStringLiteral("git"), onPath(QStringLiteral("git"))},
-        {QStringLiteral("python"), onPath(QStringLiteral("python")) || onPath(QStringLiteral("py"))},
+        {QStringLiteral("python"), !workingPython().isEmpty()},
         {QStringLiteral("buildTools"), QFileInfo::exists(vswhere)},
         {QStringLiteral("runtime"), QFileInfo::exists(runtimeDir + QStringLiteral("/PS2Recomp/CMakeLists.txt"))},
         {QStringLiteral("game"), !runnerPath().isEmpty()},

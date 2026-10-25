@@ -7,6 +7,8 @@
 #   recomp     ps2_recomp: the profile's executable (languages.json: recompile_elf) -> C++ (data/<game>/recomp)
 #   sync       generated C++ + the profile's overrides into the runtime's runner (only changed files)
 #   build      ps2EntryRunner (log: data/<game>/logs/build.log)
+#   pgo        clang only: an instrumented build plays the [optimize] pad script, its profile goes to
+#              data/<game>/pgo/gow.profdata, and the game is rebuilt with it (profile-guided optimisation)
 #   optimize   the game plays itself (profile [optimize]: pad script, seconds) recording the VU1 microcode and IOP
 #              modules it uses, then "native"
 #   native     the recorded VU1 microcode and IOP modules compiled into the game (the launcher records new microcode
@@ -22,6 +24,11 @@
 # -Pdb: Release with debug information (ps2EntryRunner.pdb) for profilers; the optimised code is the same
 # -Codegen locals (default): recomp stage with register-locals code generation (engine/patches/08, ~22 % less EE
 #        thread time); -Codegen classic generates the code as before patch 08
+# -Toolchain msvc|clang: the C++ compiler. msvc = Visual Studio Build Tools (cl.exe, 45-60 min for a full build);
+#        clang = llvm-mingw (downloaded once into data\_tools, no Visual Studio needed for the game, ~15 min, static
+#        exe; needs engine/patches/12). clang builds go to <build root>-clang, so switching keeps both. The choice is
+#        remembered in data\toolchain.txt (the launcher's runs use it too). With data\<game>\pgo\gow.profdata (the pgo
+#        stage) clang builds are profile-guided.
 param(
     [string]$Game = 'gow1',
     [string[]]$Stages = @('fetch', 'discs', 'configure', 'recomp', 'sync', 'build'),
@@ -31,6 +38,7 @@ param(
     [switch]$Pdb,
     [ValidateSet('classic', 'locals')][string]$Codegen = 'locals',
     [string]$BuildRoot = '',
+    [ValidateSet('', 'msvc', 'clang')][string]$Toolchain = '',
     [int]$Seconds = 0
 )
 $ErrorActionPreference = 'Stop'
@@ -48,9 +56,20 @@ function Native($exe, [string[]]$a, $what) {
 }
 
 # --- tools -----------------------------------------------------------------------------------------------------------
-$python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
-if (-not $python) { throw 'Python 3 not found (python.org; tick "Add python.exe to PATH")' }
+# a Python 3 that really runs: the Microsoft Store's python.exe stub (WindowsApps) is a command but not a Python
+$python = $null
+$stub = $false
+foreach ($name in 'python', 'py') {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) { continue }
+    & $cmd.Source -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' *> $null
+    if ($LASTEXITCODE -eq 0) { $python = $cmd.Source; break }
+    if ($cmd.Source -like '*\WindowsApps\*') { $stub = $true }
+}
+if (-not $python) {
+    if ($stub) { throw 'Python 3 not found: "python" is the Microsoft Store shortcut. Install Python from python.org (tick "Add python.exe to PATH") or turn off the python.exe App execution alias in Windows Settings' }
+    throw 'Python 3 not found: install it from python.org and tick "Add python.exe to PATH" (a new terminal or launcher start is needed afterwards)'
+}
 $git = (Get-Command git -ErrorAction SilentlyContinue).Source
 $profileJson = & $python -I (Join-Path $root 'tools\pipeline\profile.py') $Game
 if ($LASTEXITCODE -ne 0) { throw "no game profile '$Game' (games\$Game\game.toml)" }
@@ -84,14 +103,30 @@ if (-not $BuildRoot) {
     New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
     [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
 }
-$bld =if ($Config -eq 'Release') { $BuildRoot } else { "$BuildRoot-dev" }   # Ninja is single-config: one folder each
+# the compiler: -Toolchain, else the one this copy used last (data\toolchain.txt), else msvc
+$toolchainFile = Join-Path $root 'data\toolchain.txt'
+if (-not $Toolchain -and (Test-Path $toolchainFile)) { $Toolchain = (Get-Content $toolchainFile -Raw).Trim() }
+if ($Toolchain -notin @('msvc', 'clang')) { $Toolchain = 'msvc' }
+[IO.File]::WriteAllText($toolchainFile, $Toolchain)
+$bld = if ($Config -eq 'Release') { $BuildRoot } else { "$BuildRoot-dev" }   # Ninja is single-config: one folder each
+if ($Toolchain -eq 'clang') { $bld += '-clang' }   # CMake cannot change the compiler of a configured folder
+$pgoDir = Join-Path $root "data\$Game\pgo"
+$pgoProfile = Join-Path $pgoDir 'gow.profdata'
 $runnerExe = Join-Path $bld 'ps2xRuntime\ps2EntryRunner.exe'
 New-Item -ItemType Directory -Force $data, $logs | Out-Null
-# long paths for git in this process only (the dependencies' checkouts); the user's git config is not changed
-$env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'core.longpaths'; $env:GIT_CONFIG_VALUE_0 = 'true'
-# parallel compilers: one per logical core, at most one per 1.3 GB above 3 GB (a cl.exe on generated code ~1.3 GB)
+# git settings for this process only (the user's git config is not changed): long paths (the dependencies'
+# checkouts), and engine\runtime trusted as ours — on drives without file owners (exFAT/FAT32 USB disks, some network
+# shares) git otherwise stops with "detected dubious ownership in repository"
+$env:GIT_CONFIG_COUNT = '2'
+$env:GIT_CONFIG_KEY_0 = 'core.longpaths'; $env:GIT_CONFIG_VALUE_0 = 'true'
+$env:GIT_CONFIG_KEY_1 = 'safe.directory'; $env:GIT_CONFIG_VALUE_1 = (Barra $rt)
+# parallel compilers: two logical cores stay free for Windows (a build on every core froze the machine), at most one
+# compiler per 1.6 GB above 4 GB (a cl.exe on generated code takes 1.3-1.6 GB; paging made the build and the test crawl)
 $ramGb = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB
-$jobs = [int][math]::Max(1, [math]::Min([Environment]::ProcessorCount, [math]::Floor(($ramGb - 3) / 1.3)))
+$jobs = [int][math]::Max(1, [math]::Min([Environment]::ProcessorCount - 2, [math]::Floor(($ramGb - 4) / 1.6)))
+# the whole pipeline (cl.exe, ninja, python) runs below normal priority so the desktop stays usable; the recorded test
+# game goes back to normal priority in the optimize stage
+try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 
 function Use-Msvc {
     if ($env:VCINSTALLDIR) { return }
@@ -102,6 +137,46 @@ function Use-Msvc {
     cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { Set-Item "env:$($Matches[1])" $Matches[2] } }
     foreach ($c in @('cl', 'cmake', 'ninja')) { if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { throw "$c not found after vcvars64.bat" } }
 }
+# llvm-mingw (clang for Windows with its own headers and libraries; Visual Studio is not used) downloaded once, plus
+# CMake and Ninja: from PATH or the Build Tools when present, otherwise from pip
+$llvmVersion = 'llvm-mingw-20261020-ucrt-x86_64'
+$llvmSha256 = 'fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd'
+function Use-Clang {
+    if ($script:clangReady) { return }
+    $tools = Join-Path $root 'data\_tools'
+    $llvm = Join-Path $tools $llvmVersion
+    if (-not (Test-Path (Join-Path $llvm 'bin\clang++.exe'))) {
+        $zip = Join-Path $tools "$llvmVersion.zip"
+        New-Item -ItemType Directory -Force $tools | Out-Null
+        if (-not (Test-Path $zip) -or (Get-FileHash $zip -Algorithm SHA256).Hash -ne $llvmSha256) {
+            Write-Host "downloading $llvmVersion (about 170 MB, once)"
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -UseBasicParsing "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/$llvmVersion.zip" -OutFile $zip
+            if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $llvmSha256) { Remove-Item $zip; throw "$llvmVersion.zip: unexpected SHA-256" }
+        }
+        Write-Host "unpacking $llvmVersion"
+        Expand-Archive -Path $zip -DestinationPath $tools -Force
+    }
+    $paths = @(Join-Path $llvm 'bin')
+    foreach ($c in 'cmake', 'ninja') {
+        if (Get-Command $c -ErrorAction SilentlyContinue) { continue }
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = if (Test-Path $vswhere) { & $vswhere -latest -products * -property installationPath } else { $null }
+        $ext = if ($vs) { Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake' } else { '' }
+        $cand = if ($c -eq 'cmake') { Join-Path $ext 'CMake\bin\cmake.exe' } else { Join-Path $ext 'Ninja\ninja.exe' }
+        if ($vs -and (Test-Path $cand)) { $paths += Split-Path $cand }
+        else {
+            Native $python @('-m', 'pip', 'install', '--user', '--quiet', $c) "pip install $c"
+            $paths += "$(& $python -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))")".Trim()
+        }
+    }
+    # the MSVC environment (INCLUDE, LIB) must not leak into the mingw target
+    foreach ($v in 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR') { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
+    $env:PATH = ($paths -join ';') + ';' + $env:PATH
+    $script:llvmBin = Join-Path $llvm 'bin'
+    $script:clangReady = $true
+}
+function Use-Toolchain { if ($Toolchain -eq 'clang') { Use-Clang } else { Use-Msvc } }
 function Languages {
     $f = Join-Path $data 'languages.json'
     if (-not (Test-Path $f)) { throw 'no prepared disc: run the "discs" stage with your ISO' }
@@ -170,8 +245,8 @@ if ($Stages -contains 'discs') {
 }
 
 # --- configure ------------------------------------------------------------------------------------------------------
-function Configure {
-    Use-Msvc
+function Configure([string]$dir = $bld, [string]$pgo = 'auto') {
+    Use-Toolchain
     Need (Join-Path $rec 'CMakeLists.txt') 'runtime (run the fetch stage)'
     $ltcgValue = if ($Ltcg) { 'ON' } else { 'OFF' }
     $pdbValue = if ($Pdb) { 'ON' } else { 'OFF' }
@@ -195,7 +270,20 @@ function Configure {
         $extra += "-DPS2X_VU1_GENERATOR_SOURCE=$(Barra (Join-Path $rt $prof.runtime.vu1_generator))"
         $extra += "-DPS2X_VU1N_GEN_OVERRIDE=$(Barra (Join-Path $rt $prof.runtime.vu1_native_generator))"
     }
-    Native 'cmake' (@('-S', $rec, '-B', $bld, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
+    if ($Toolchain -eq 'clang') {
+        # -fno-strict-aliasing -fwrapv: the generated code and the runtime rely on MSVC's lenient aliasing and wrapping;
+        # -static: no libc++ / libunwind DLLs next to the exe
+        $flags = '-fno-strict-aliasing -fwrapv'
+        $link = '-static'
+        if ($pgo -eq 'generate') { $flags += ' -fprofile-instr-generate'; $link += ' -fprofile-instr-generate' }
+        elseif ($pgo -eq 'auto' -and (Test-Path $pgoProfile)) {
+            Write-Host "profile-guided: $pgoProfile"
+            $flags += " -fprofile-instr-use=$(Barra $pgoProfile) -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+        }
+        $extra += @('-DCMAKE_C_COMPILER=clang', '-DCMAKE_CXX_COMPILER=clang++', '-DCMAKE_RC_COMPILER=llvm-rc',
+            "-DCMAKE_C_FLAGS=$flags", "-DCMAKE_CXX_FLAGS=$flags", "-DCMAKE_EXE_LINKER_FLAGS=$link")
+    }
+    Native 'cmake' (@('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
         '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8') + $extra) 'cmake configure'
@@ -205,7 +293,7 @@ if ($Stages -contains 'configure') { Step "configure ($Config, $bld)"; Configure
 # --- recompile ------------------------------------------------------------------------------------------------------
 if ($Stages -contains 'recomp') {
     Step 'recompile the executable'
-    Use-Msvc
+    Use-Toolchain
     Need (Join-Path $bld 'CMakeCache.txt') 'configured build folder (run the configure stage)'
     Native 'ninja' @('-C', $bld, "-j$jobs", 'ps2_recomp') 'ps2_recomp build'
     $elf = (Languages).recompile_elf
@@ -253,16 +341,16 @@ if ($Stages -contains 'sync') {
 }
 
 # --- build ----------------------------------------------------------------------------------------------------------
-function Build-Game {
-    Use-Msvc
-    Need (Join-Path $bld 'CMakeCache.txt') 'configured build folder (run the configure stage)'
+function Build-Game([string]$dir = $bld) {
+    Use-Toolchain
+    Need (Join-Path $dir 'CMakeCache.txt') 'configured build folder (run the configure stage)'
     $log = Join-Path $logs 'build.log'
     Write-Host "$jobs compilers in parallel"
     $ErrorActionPreference = 'Continue'
     $writer = New-Object IO.StreamWriter($log, $false, (New-Object Text.UTF8Encoding($false)))
     $writer.AutoFlush = $true
     $lastPct = -1; $errors = 0
-    & ninja -C $bld "-j$jobs" ps2EntryRunner 2>&1 | ForEach-Object {
+    & ninja -C $dir "-j$jobs" ps2EntryRunner 2>&1 | ForEach-Object {
         $s = "$_"
         if ($s -eq 'System.Management.Automation.RemoteException') { return }
         $writer.WriteLine($s)
@@ -270,15 +358,51 @@ function Build-Game {
             $pct = [int](100 * [int]$Matches[1] / [int]$Matches[2])
             if ($pct -ne $lastPct) { $lastPct = $pct; Write-Host "@@progress $($Matches[1]) $($Matches[2])" }
             if ($s -match 'Linking CXX executable') { Write-Host '@@status linking the executable' }
-        } elseif ($s -match 'error C\d|error LNK|fatal error|FAILED:') { if (++$errors -le 20) { Write-Host $s -ForegroundColor Red } }
+        } elseif ($s -match 'error C\d|error LNK|fatal error|FAILED:|error:') { if (++$errors -le 20) { Write-Host $s -ForegroundColor Red } }
     }
     $rc = $LASTEXITCODE
     $writer.Close()
     $ErrorActionPreference = 'Stop'
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
-    Write-Host "OK: $runnerExe"
+    Write-Host "OK: $(Join-Path $dir 'ps2xRuntime\ps2EntryRunner.exe')"
 }
-if ($Stages -contains 'build') { Step "build the game ($Config)"; Build-Game }
+if ($Stages -contains 'build') { Step "build the game ($Config, $Toolchain)"; Build-Game }
+
+# --- pgo: profile-guided optimisation (clang) -----------------------------------------------------------------------
+# An instrumented copy of the game (its own build folder) plays the [optimize] pad script with the hardware renderer and
+# sound, like a player; closing its window writes the profile (engine/patches/12), which is merged into gow.profdata and
+# used by every later clang build. A new recompile leaves it partly stale (those functions are just not profiled).
+if ($Stages -contains 'pgo') {
+    if ($Toolchain -ne 'clang') { throw 'the pgo stage needs -Toolchain clang' }
+    $genBld = "$bld-pgogen"
+    Step 'profile-guided optimisation: instrumented build'
+    Configure $genBld 'generate'
+    Build-Game $genBld
+    $secs = if ($Seconds -gt 0) { $Seconds } else { [int]$prof.optimize.seconds }
+    Step "profile-guided optimisation: the game plays itself for $secs s (do not touch the keyboard or the game window)"
+    $elf = (Languages).recompile_elf
+    New-Item -ItemType Directory -Force $pgoDir | Out-Null
+    Get-ChildItem $pgoDir -Filter '*.profraw' -ErrorAction SilentlyContinue | Remove-Item
+    $vars = @{ LLVM_PROFILE_FILE = (Join-Path $pgoDir 'run-%p.profraw'); GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_PAD_TEST_NO_CAPTURE = '1'
+               PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'; GOW_AUDIO_DEVICE = 'default'
+               GOW_PAD_GUION = $prof.optimize.pad_script }
+    if (Get-ChildItem -Path $vu1 -Filter *.bin -ErrorAction SilentlyContinue | Select-Object -First 1) { $vars.GOW_VU1_CAPTURA = $vu1 }
+    foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
+    $p = Start-Process -FilePath (Join-Path $genBld 'ps2xRuntime\ps2EntryRunner.exe') -ArgumentList "`"$elf`"" -WorkingDirectory $logs -PassThru
+    try { $p.PriorityClass = 'Normal' } catch { }
+    for ($t = 0; $t -lt $secs -and -not $p.HasExited; $t += 5) { Start-Sleep 5; Write-Host "@@progress $([math]::Min($t + 5, $secs)) $secs" }
+    if (-not $p.HasExited) { $null = $p.CloseMainWindow(); $null = $p.WaitForExit(60000) }   # the profile is written on close
+    if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+    foreach ($k in $vars.Keys) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+    $raw = @(Get-ChildItem $pgoDir -Filter '*.profraw' | Where-Object Length -gt 0)
+    if (-not $raw) { throw 'the instrumented game wrote no profile' }
+    Native (Join-Path $script:llvmBin 'llvm-profdata.exe') (@('merge', '-o', $pgoProfile) + @($raw.FullName)) 'llvm-profdata merge'
+    $raw | Remove-Item
+    Write-Host ("profile: {0} ({1:N0} MB)" -f $pgoProfile, ((Get-Item $pgoProfile).Length / 1MB))
+    Step "rebuild with the profile ($Config, clang)"
+    Configure
+    Build-Game
+}
 
 # --- optimize / native ----------------------------------------------------------------------------------------------
 if ($Stages -contains 'optimize') {
@@ -290,7 +414,10 @@ if ($Stages -contains 'optimize') {
     $vars = @{ GOW_VU1_CAPTURA = $vu1; PS2X_IOP_DUMP_MODULES = $iopMods; GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_AUDIO = '0'
                GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; GOW_PAD_GUION = $prof.optimize.pad_script }
     foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
+    # nothing left from the build (mspdbsrv, vctip, a stray cl.exe) may compete with the game for the 4 minutes
+    Get-Process -Name mspdbsrv, vctip, cl, link -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $p = Start-Process -FilePath $runnerExe -ArgumentList "`"$elf`"" -WorkingDirectory $logs -PassThru
+    try { $p.PriorityClass = 'Normal' } catch { }
     for ($t = 0; $t -lt $secs -and -not $p.HasExited; $t += 5) { Start-Sleep 5; Write-Host "@@progress $([math]::Min($t + 5, $secs)) $secs" }
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     foreach ($k in $vars.Keys) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }

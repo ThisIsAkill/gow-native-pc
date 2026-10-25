@@ -5,6 +5,8 @@ rem   build.cmd -Discs "D:\usa.iso|D:\ptbr.iso"                  several ISOs: o
 rem   build.cmd -Stages sync,build                               only the changed C++ (after editing the runtime)
 rem   build.cmd -Stages optimize                                 record + compile VU1/IOP native code (60 fps)
 rem   build.cmd -Stages native                                   compile the VU1 code recorded while playing
+rem   build.cmd -Toolchain clang -Stages configure,recomp,sync,build   build with clang (llvm-mingw, ~15 min)
+rem   build.cmd -Stages pgo                                      clang: profile-guided rebuild (the game plays itself)
 rem   build.cmd -Stages launcher                                 the Qt launcher (downloads Qt 6 once) + "God of War Launcher.lnk" here
 rem   build.cmd -Stages installer                                the release setup: data\_package\gow-native-pc-setup.exe
 rem Full list: tools\pipeline\build.ps1
