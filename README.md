@@ -67,8 +67,19 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches).
 
 ## Getting started
 
-1. Download the launcher from **Releases** (or build it: `build.cmd -Stages launcher`).
-2. Open it → **Install** tab:
+1. Get the launcher, either way:
+   - **Installer (easiest):** download `gow-native-pc-setup.exe` from
+     [Releases](https://github.com/Vnnc1/gow-native-pc/releases), run it, **INSTALL** (no administrator rights,
+     your user only). It adds Start menu / desktop shortcuts and an entry in Windows' *Apps* to uninstall it.
+   - **From the source code:** clone this repository and run, in its folder:
+
+     ```bat
+     build.cmd -Stages launcher
+     ```
+
+     The first time it downloads Qt 6 (about 1 GB). When it finishes, **`God of War Launcher.lnk`** appears in the
+     repository folder: double-click it.
+2. In the launcher → **Install** tab:
    1. install anything missing under **Requirements**;
    2. **Download runtime**;
    3. **Add ISO…** (one or more);
@@ -100,6 +111,7 @@ Planned: the architecture is per game (`games/<id>/`), but a GoW II port does no
 engine/     runtime.toml (which runtime to download) + numbered patches (origin and reason in each)
 games/      per-game profiles: gow1 (playable), gow2 (planned)
 launcher/   the Qt 6 launcher: installation + play
+installer/  the release setup .exe (Win32, packs launcher + tools into one file; build.cmd -Stages installer)
 tools/      disc/ (identify, extract, prepare discs), pipeline/ (build)
 docs/       architecture, tested hardware, translations, adding a game
 data/       (generated, git-ignored) prepared discs, saves, logs, recorded code

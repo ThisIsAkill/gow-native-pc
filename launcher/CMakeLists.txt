@@ -16,6 +16,7 @@ qt_add_executable(gow-launcher WIN32
     src/lanzador.h
     src/installer_backend.cpp
     src/installer_backend.h
+    gow-launcher.rc
 )
 
 set(ARCHIVOS_QML

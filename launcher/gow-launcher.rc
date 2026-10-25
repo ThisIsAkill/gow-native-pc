@@ -1,0 +1,2 @@
+// Windows resources of gow-launcher.exe: the application icon (drawn by tools/make_icon.ps1).
+1 ICON "icon.ico"

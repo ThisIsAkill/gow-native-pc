@@ -25,7 +25,13 @@ launcher/                   Qt 6 launcher (from the Tobiichi Launcher). src/lanz
                             names), src/installer_backend.* = install side (ours, English), qml/InstallPage.qml = tab.
                             Own look (not Tobiichi's): qml/Main.qml = sidebar (NavItem) + pages, `pagina` 0 Home,
                             1 Install, 2-6 settings; colours in qml/Tema.qml (oro* hold the crimson accent);
-                            screenshots: TOBIICHI_CAPTURA=<png> TOBIICHI_CAPTURA_PESTANA=<page>
+                            screenshots: TOBIICHI_CAPTURA=<png> TOBIICHI_CAPTURA_PESTANA=<page>. icon.ico from
+                            tools/make_icon.ps1 (also the installer's)
+installer/setup.cpp         release setup, Win32 + GDI+ (no Qt: one self-contained exe). Same exe packs (--pack <dir>
+                            <out>, LZMS blocks appended + footer), installs per user (HKCU Apps entry, shortcuts,
+                            uninstall.exe + uninstall.lst) and uninstalls. Tests without clicks: /S [/D=<dir>];
+                            uninstall.exe /uninstall-from <dir> /S [/purge] (purge removes C:\gow-build only when its
+                            CMakeCache points into <dir>); GOW_SETUP_CAPTURE=<png> screenshot
 data/                       generated, git-ignored: discs, languages.json, mc0, recomp output, vu1_capture,
                             iop_modules, logs, _tools/qt
 ```

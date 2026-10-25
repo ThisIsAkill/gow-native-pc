@@ -67,8 +67,20 @@ Waffle565 e KIexster), e aplica [`engine/patches`](engine/patches).
 
 ## Como usar
 
-1. Baixe o launcher pronto em **Releases** (ou compile: `build.cmd -Stages launcher`).
-2. Abra o launcher → aba **Instalação**:
+1. Tenha o launcher, de um destes jeitos:
+   - **Instalador (mais fácil):** baixe `gow-native-pc-setup.exe` em
+     [Releases](https://github.com/Vnnc1/gow-native-pc/releases), execute e clique em **INSTALAR** (sem
+     administrador, só para o seu usuário). Ele cria atalhos no Menu Iniciar / área de trabalho e uma entrada em
+     *Aplicativos* do Windows para desinstalar.
+   - **Pelo código-fonte:** clone este repositório e rode, na pasta dele:
+
+     ```bat
+     build.cmd -Stages launcher
+     ```
+
+     Na primeira vez ele baixa o Qt 6 (cerca de 1 GB). Ao terminar, aparece **`God of War Launcher.lnk`** na pasta
+     do repositório: dê dois cliques.
+2. No launcher → aba **Instalação**:
    1. instale o que faltar em **Requisitos**;
    2. **Baixar runtime**;
    3. **Adicionar ISO…** (uma ou mais);
@@ -100,6 +112,7 @@ Planejado: a arquitetura é por jogo (`games/<id>/`), mas o port do GoW II ainda
 engine/     runtime.toml (qual runtime baixar) + patches numerados (com origem e motivo em cada um)
 games/      perfis por jogo: gow1 (jogável), gow2 (planejado)
 launcher/   o launcher Qt 6: instalação + jogo
+installer/  o instalador .exe da release (Win32, junta launcher + ferramentas num arquivo; build.cmd -Stages installer)
 tools/      disc/ (identificar, extrair, preparar discos), pipeline/ (compilação)
 docs/       arquitetura, hardware testado, traduções, como adicionar um jogo
 data/       (gerado, fora do git) discos preparados, saves, logs, código gravado

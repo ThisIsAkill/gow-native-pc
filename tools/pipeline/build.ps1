@@ -11,8 +11,10 @@
 #              modules it uses, then "native"
 #   native     the recorded VU1 microcode and IOP modules compiled into the game (the launcher records new microcode
 #              while you play, so this makes visited areas faster); configure + build
-#   launcher   (development) the Qt launcher from launcher/ into launcher/build, Qt 6 downloaded once into data/_tools
+#   launcher   the Qt launcher from launcher/ into launcher/build (Qt 6 downloaded once into data/_tools), plus the
+#              shortcut "God of War Launcher.lnk" in the repository root to start it
 #   package    the release zip for GitHub Releases (data/_package): launcher/bin + tools, games, engine (no runtime), docs
+#   installer  the release setup (data/_package/gow-native-pc-setup.exe): installer/ built and packed with the package
 # Output protocol for the launcher: "=== <step> ===", "@@progress <done> <all>", "@@status <text>", other lines = log.
 # usage: powershell -ExecutionPolicy Bypass -File tools\pipeline\build.ps1 [-Game gow1] [-Stages fetch,discs,configure,
 #        recomp,sync,build] [-Discs "<iso>|<iso>"] [-Config Release|RelWithDebInfo] [-Ltcg] [-Pdb] [-BuildRoot C:\gow-build]
@@ -277,12 +279,18 @@ if ($Stages -contains 'launcher') {
     Native 'ninja' @('-C', $lb, "-j$jobs") 'launcher build'
     $exe = Get-ChildItem $lb -Filter '*.exe' | Select-Object -First 1 -ExpandProperty FullName
     Native (Join-Path $qt 'bin\windeployqt.exe') @('--release', '--no-translations', '--qmldir', (Join-Path $root 'launcher\qml'), $exe) 'windeployqt'
+    # shortcut in the repository root, so the built launcher is one double-click away
+    $lnk = Join-Path $root 'God of War Launcher.lnk'
+    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $sc.TargetPath = $exe; $sc.WorkingDirectory = $lb; $sc.IconLocation = "$exe,0"; $sc.Description = 'God of War Native PC'
+    $sc.Save()
     Write-Host "OK: $exe"
+    Write-Host "shortcut: $lnk"
 }
 # --- package: the release zip (GitHub Releases) ---------------------------------------------------------------------
 # launcher/bin = the built launcher + its Qt DLLs; the rest is this repository without generated data. Users unzip it
 # anywhere and start launcher\bin\gow-launcher.exe (it finds the repository root by games\<id>\game.toml above it).
-if ($Stages -contains 'package') {
+if ($Stages -contains 'package' -or ($Stages -contains 'installer' -and -not (Test-Path (Join-Path $root 'data\_package\gow-native-pc')))) {
     Step 'release package'
     $lb = Join-Path $root 'launcher\build'
     $exe = Join-Path $lb 'gow-launcher.exe'
@@ -304,5 +312,21 @@ if ($Stages -contains 'package') {
     if (Test-Path $zip) { Remove-Item $zip }
     Compress-Archive -Path $stage -DestinationPath $zip
     Write-Host ("OK: {0} ({1:N0} MB)" -f $zip, ((Get-Item $zip).Length / 1MB))
+}
+# --- installer: one .exe for GitHub Releases ------------------------------------------------------------------------
+# installer/setup.cpp (Win32, no Qt) packs the package folder into a copy of itself (LZMS); the result installs per user,
+# makes Start menu / desktop shortcuts and an Apps entry, and removes itself (uninstall.exe).
+if ($Stages -contains 'installer') {
+    Step 'installer'
+    Use-Msvc
+    $stage = Join-Path $root 'data\_package\gow-native-pc'
+    Need (Join-Path $stage 'launcher\bin\gow-launcher.exe') 'release package (run the package stage)'
+    $ib = Join-Path $root 'data\_tools\installer-build'
+    Native 'cmake' @('-S', (Join-Path $root 'installer'), '-B', $ib, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release') 'installer configure'
+    Native 'ninja' @('-C', $ib) 'installer build'
+    $setup = Join-Path $root 'data\_package\gow-native-pc-setup.exe'
+    Write-Host "@@status packing (LZMS, about a minute)"
+    Native (Join-Path $ib 'gow-setup.exe') @('--pack', $stage, $setup) 'installer pack'
+    Write-Host ("OK: {0} ({1:N0} MB)" -f $setup, ((Get-Item $setup).Length / 1MB))
 }
 Write-Host "`nDone." -ForegroundColor Green

@@ -8,3 +8,5 @@ launcher/build/
 *.bin
 *.ps2
 __pycache__/
+# shortcut made by the launcher stage
+*.lnk
