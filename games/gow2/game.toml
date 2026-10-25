@@ -1,0 +1,30 @@
+# Game profile: God of War II (PS2, NTSC-U) — PLANNED, not buildable yet. See games/gow2/README.md for what a port
+# needs; the pipeline refuses profiles whose status is "planned".
+id = "gow2"
+title = "God of War II"
+status = "planned"
+
+[executable]
+name = "SCUS_974.81"           # to be confirmed from the disc's SYSTEM.CNF
+serial = "SCUS-97481"
+crc = ""                       # fill in from the original disc (tools/disc/identify.py prints it)
+text_sha1 = ""
+
+[runtime]
+# a GoW2 port needs its own function map, recompiler config and overrides (none exist yet)
+recompiler_template = ""
+function_map = ""
+overrides = []
+
+[disc]
+toc = ""
+paks = []
+iop_modules_dir = "IOP_MOD"
+text_files = []
+
+[[editions]]
+id = "usa"
+kind = "original"
+language = "en"
+label = "English (USA)"
+elf_crc = ""

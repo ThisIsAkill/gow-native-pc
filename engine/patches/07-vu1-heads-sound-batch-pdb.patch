@@ -1,0 +1,192 @@
+- Native VU1: a block entry without native code (an entry the generator cannot find, such as a jump through a register)
+  is appended to <GOW_VU1_CAPTURA>/vu1n_heads_seen.txt; the pipeline merges those with the profile's vu1n_heads.txt
+  (it was not passed at all after the move to data/<game>/: 28 blocks of ship combat ran in the interpreter and every
+  native run left and re-entered, ~1.2 M times per 5 s).
+- SPU2 mixer: advanceTo mixes into a batch and appends it to the output with one lock per call instead of one per
+  sample (48,000 lock/unlock pairs a second on the game thread, contended by the audio device thread).
+- PS2X_RELEASE_PDB: Release with debug information (/Z7, /DEBUG:FULL) for profilers (build.cmd -Pdb); same code.
+Measured on the ship (Xeon E5-2666 v3, RX 580, 2x, with 05 and 06): combat 52-57 -> 55-60 fps.
+
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+index 25fe445..06c74ff 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+@@ -545,7 +545,7 @@ namespace ps2x::iop::detail
+         return clamp16((sample * v.envelope) >> 15);
+     }
+ 
+-    void SoundEngine::step()
++    void SoundEngine::step(int16_t *out)
+     {
+         int32_t coreOut[2][2] = {};
+         for (uint32_t core = 0; core < 2u; ++core)
+@@ -568,13 +568,12 @@ namespace ps2x::iop::detail
+         }
+         // core 0 through its master volume, added to core 1's dry output, all through core 1's master volume
+         // (simplified MMIX routing)
+-        std::lock_guard<std::mutex> lock(m_outputMutex);
+         const int32_t master[2][2] = {{volumeOf(m_cores[0].mvolL), volumeOf(m_cores[0].mvolR)},
+                                       {volumeOf(m_cores[1].mvolL), volumeOf(m_cores[1].mvolR)}};
+         for (uint32_t side = 0; side < 2u; ++side)
+         {
+             const int32_t core0 = (coreOut[0][side] * master[0][side]) >> 14;
+-            m_output.push_back(clamp16(((core0 + coreOut[1][side]) * master[1][side]) >> 14));
++            out[side] = clamp16(((core0 + coreOut[1][side]) * master[1][side]) >> 14);
+         }
+         // GOW_SND_VOICEDUMP=1: while a core input stream (a movie) plays, once per second for its first 10 seconds, every
+         // voice that is still sounding (active, pitch and envelope non-zero) with its volumes and sample addresses
+@@ -605,7 +604,7 @@ namespace ps2x::iop::detail
+         if (raw)
+         {
+             static std::vector<int16_t> pending;
+-            pending.insert(pending.end(), m_output.end() - 2, m_output.end());
++            pending.insert(pending.end(), out, out + 2);
+             if (pending.size() >= 8192u)
+             {
+                 std::fwrite(pending.data(), sizeof(int16_t), pending.size(), raw);
+@@ -613,18 +612,25 @@ namespace ps2x::iop::detail
+                 pending.clear();
+             }
+         }
+-        if (m_output.size() > kMaxBufferedFrames * 2u)
+-            m_output.erase(m_output.begin(), m_output.begin() + static_cast<std::ptrdiff_t>(m_output.size() / 2u & ~size_t{1}));
+     }
+ 
++    // gow-native-pc: the frames are mixed into m_batch and appended to the output with one lock per call, not one per frame
++    // (48,000 lock/unlock pairs a second on the game thread, contended by the audio device thread).
+     void SoundEngine::advanceTo(uint64_t iopCycle)
+     {
+         if (iopCycle <= m_lastCycle)
+             return;
+         const uint64_t samples = (iopCycle - m_lastCycle) / CyclesPerSample;
++        if (samples == 0u)
++            return;
++        m_batch.resize(static_cast<size_t>(samples) * 2u);
+         for (uint64_t i = 0; i < samples; ++i)
+-            step();
++            step(m_batch.data() + i * 2u);
+         m_lastCycle += samples * CyclesPerSample;
++        std::lock_guard<std::mutex> lock(m_outputMutex);
++        m_output.insert(m_output.end(), m_batch.begin(), m_batch.end());
++        if (m_output.size() > kMaxBufferedFrames * 2u)
++            m_output.erase(m_output.begin(), m_output.begin() + static_cast<std::ptrdiff_t>(m_output.size() / 2u & ~size_t{1}));
+     }
+ 
+     size_t SoundEngine::pendingFrames() const
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
+index d91bc1a..5f8d5c1 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
+@@ -103,13 +103,14 @@ namespace ps2x::iop::detail
+         static void stepEnvelope(Voice &v);
+         static uint32_t naxOf(const Voice &v) noexcept;
+         void streamSample(uint32_t core, int32_t &left, int32_t &right);
+-        void step();
++        void step(int16_t *out); // one stereo frame into out[0..1]
+ 
+         std::vector<uint16_t> m_ram;
+         std::array<Core, 2> m_cores{};
+         std::array<StreamRing, 2> m_stream{};
+         std::array<bool, 2> m_streamHalf{};
+         std::vector<int16_t> m_output;
++        std::vector<int16_t> m_batch; // gow-native-pc: frames mixed by advanceTo, appended to m_output under one lock
+         mutable std::mutex m_outputMutex;
+         double m_resamplePhase = 0.0; // drainOutput: fractional read position when playing back faster
+         uint64_t m_lastCycle = 0;
+diff --git a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+index b1e12e2..09df97b 100644
+--- a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
++++ b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+@@ -10,6 +10,8 @@ set(PS2X_LTO_JOBS "" CACHE STRING "GCC/Clang: procesos del enlace con LTO (vací
+ # generated functions ran for hours in one thread on a 10-core Xeon; OFF keeps every other Release flag.
+ option(PS2X_RELEASE_LTCG "Release: whole-program optimisation (/GL, /LTCG, IPO)" ON)
+ 
++option(PS2X_RELEASE_PDB "Release: debug information (/Z7, /DEBUG) for profiling; the optimised code is the same" OFF)
++
+ function(EnableFastReleaseMode TargetName)
+     message("> Enabling optimization for: ${TargetName}")
+     if(MSVC)
+@@ -38,6 +40,13 @@ function(EnableFastReleaseMode TargetName)
+                 >
+             )
+         endif()
++        if(PS2X_RELEASE_PDB)
++            # gow-native-pc: debug info for profilers; /Z7 keeps it in each object (no PDB lock between parallel cl.exe)
++            target_compile_options(${TargetName} PRIVATE $<$<CONFIG:Release>:/Z7>)
++            if(TARGET ${TargetName})
++                target_link_options(${TargetName} PRIVATE $<$<CONFIG:Release>:/DEBUG:FULL>)
++            endif()
++        endif()
+         if(PS2X_RELEASE_LTCG)
+             target_compile_options(${TargetName} PRIVATE $<$<CONFIG:Release>:/GL>) # whole program opt
+             if(TARGET ${TargetName})
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 237d090..095fd6f 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -206,6 +206,7 @@ struct VU1NativeAccess
+     static void commitDue(VU1Interpreter &vu); // commitReadyPipelines after a native block (FDIV/EFU-only fast path)
+     static VU1Interpreter::NativeState::Slot &slotFor(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint32_t pc);
+     static void codeChanged(VU1Interpreter::NativeState &ns, const uint8_t *code); // micro memory (16 KB) rewritten
++    static void recordMissHead(uint32_t pc); // gow-native-pc: block entry without native code, for the next native build
+     static uint64_t &laneWord(VU1Interpreter &vu, uint32_t lane);
+     template <typename F>
+     static void walkHistory(VU1Interpreter::NativeState &ns, uint64_t now, uint64_t want[3], F &&ready);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 091edad..cf0591e 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -1,8 +1,12 @@
+ // GOW-Port: native VU1 backend runtime (included at the end of ps2_vu1_core.cpp). See include/runtime/ps2_vu1_native.h.
+ #include "runtime/ps2_vu1_native.h"
+ 
++#include <cstdio>
+ #include <memory>
++#include <mutex>
++#include <string>
+ #include <unordered_map>
++#include <unordered_set>
+ 
+ namespace
+ {
+@@ -769,13 +773,38 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+                         sl.scalar[sl.scalarCount++] = {i, static_cast<uint8_t>(bt.dec[i].lowerUsage.latency),
+                                                        bt.dec[i].lowerUsage.pipeline == VU1Interpreter::PipelineFdiv};
+             }
+-            else if (ns.diag)
+-                ++ns.missPcs[pc];
++            else
++            {
++                if (ns.diag)
++                    ++ns.missPcs[pc];
++                recordMissHead(pc);
++            }
+         }
+     }
+     return sl;
+ }
+ 
++// gow-native-pc: with the VU1 capture on (GOW_VU1_CAPTURA), a block entry the native code does not have (an entry point the
++// generator cannot see, such as a jump through a register) is appended to <capture>/vu1n_heads_seen.txt; the pipeline merges
++// those into vu1n_heads.txt, so the next "native" build generates the block. Only on slot setup, once per pc.
++void VU1NativeAccess::recordMissHead(uint32_t pc)
++{
++    static const char *dir = std::getenv("GOW_VU1_CAPTURA");
++    if (!dir || !*dir)
++        return;
++    static std::mutex mutex;
++    static std::unordered_set<uint32_t> seen;
++    std::lock_guard<std::mutex> lock(mutex);
++    if (!seen.insert(pc).second)
++        return;
++    const std::string path = std::string(dir) + "/vu1n_heads_seen.txt";
++    if (FILE *f = std::fopen(path.c_str(), "a"))
++    {
++        std::fprintf(f, "%x\n", pc);
++        std::fclose(f);
++    }
++}
++
+ void VU1Interpreter::commitEverythingNow()
+ {
+     const uint64_t keep = m_cycle;

@@ -1,0 +1,10 @@
+# downloaded runtime, generated data (discs, saves, recorded microcode, logs, Qt), builds
+engine/runtime/
+data/
+launcher/build/
+# never commit game files
+*.iso
+*.ISO
+*.bin
+*.ps2
+__pycache__/

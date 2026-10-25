@@ -1,0 +1,64 @@
+# Game profile: God of War (PS2, NTSC-U). Read by tools/pipeline/profile.py (the pipeline, the disc tools and the
+# launcher all take their game-specific values from here; nothing game-specific is hard-coded elsewhere).
+id = "gow1"
+title = "God of War"
+status = "playable"            # playable | in-progress | planned
+
+[executable]
+name = "SCUS_973.99"           # the ELF named by SYSTEM.CNF (BOOT2); the runtime's overrides are registered for this name
+serial = "SCUS-97399"
+crc = "D6385328"               # PCSX2 game CRC (XOR of the ELF's 32-bit words) of the original disc
+# SHA-1 of the ELF's .text: the recompiled code depends only on it, so any disc whose executable has this code (the
+# original or a translation that only changes data) recompiles to the same program
+text_sha1 = "8c6e61a95e84e88b01a0cea25b3824cf6b2cbe00"
+
+[runtime]
+# paths inside the runtime checkout (engine/runtime.toml) used by the pipeline
+recompiler_template = "config/recomp.template.toml"
+function_map = "config/funcmap.csv"
+overrides = ["src/gow_overrides.cpp", "src/gow_pad2_packet.h", "src/gow_gs_replay.h"]
+vu1_generator = "tools/vu1/generar_vu1.cpp"
+vu1_native_generator = "tools/vu1/vu1n_gen.py"
+# VU1 block entry points the generator cannot find in the microcode (jumps through a register); without them those blocks
+# run in the interpreter and every run leaves and re-enters native code (~1.2 M times per 5 s in ship combat)
+vu1_native_heads = "vu1n_heads.txt"
+iop_native_generator = "tools/iop/iopn_gen.py"
+
+[disc]
+toc = "GODOFWAR.TOC"           # 24-byte entries: name[12], u32 part (0 = PART1.PAK, 1 = PART2.PAK), u32 size, u32 sector
+paks = ["PART1.PAK", "PART2.PAK"]
+iop_modules_dir = "IOP_MOD"    # the game loads its IRX modules as IOP_MOD/<name>.irx next to the ELF
+text_files = ["R_PERM.WAD", "R_SHELL.WAD"]   # where a translation's text lives
+widescreen_movie_ext = ".PSW"  # the 16:9 movies; the port plays them, so a disc without them maps them to .PSS
+movie_ext = ".PSS"
+
+[optimize]
+# scripted run that records the VU1 microcode and IOP modules the game uses (Tobiichi's recording script)
+seconds = 240
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadrado,44:triangulo,48:lup*3,52:x,55:cuadrado,56:triangulo,60:circulo,64:r1,70:lleft*2,74:cuadrado,76:cuadrado,80:triangulo,90:lup*4,96:x,100:cuadrado,104:l1,110:lright*2,120:cuadrado,125:triangulo,140:lup*5,150:cuadrado,160:triangulo,180:lup*5,200:cuadrado"
+
+# Known discs. kind = original (the game as released) | translation (fan translation: same code, translated data).
+# Unknown discs are still accepted when their .text matches text_sha1; their language is then guessed from the text.
+[[editions]]
+id = "usa"
+kind = "original"
+language = "en"
+label = "English (USA)"
+elf_crc = "D6385328"
+
+[[editions]]
+id = "ptbr-romsportugues-t3"
+kind = "translation"
+language = "pt-BR"
+label = "Português (Brasil) — tradução de fãs (romsportugues T3.0)"
+elf_crc = "5444DDCB"
+notes = "Single-layer repack: no .PSW widescreen movies, other movies re-encoded; hides the WideScreen menu option."
+
+# words that identify a language in R_PERM.WAD / R_SHELL.WAD when the disc is not a known edition
+[language_hints]
+"pt-BR" = ["Novo Jogo", "Carregar", "Escolher", "Dificuldade"]
+"es" = ["Nueva partida", "Cargar partida", "Dificultad"]
+"fr" = ["Nouvelle partie", "Charger", "Difficulté"]
+"de" = ["Neues Spiel", "Laden", "Schwierigkeit"]
+"it" = ["Nuova partita", "Carica", "Difficoltà"]
+"en" = ["New Game", "Load Game", "Difficulty"]

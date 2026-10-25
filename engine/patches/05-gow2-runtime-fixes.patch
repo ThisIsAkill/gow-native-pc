@@ -1,0 +1,936 @@
+Runtime fixes from the God of War II port (cxldsakeb, DaniSBR1; github.com/DaniSBR1/PS2Recomp branch godofwar2, built on
+the same Waffle565 runtime as Tobiichi), the ones its notes mark valid for God of War, in its commit order:
+8a4abab d0b6162 2b20dc4 eb5657e 1faaa0e 75c0c1d c012422 1d9f4b6 261fb44 (GS HW renderer: channel shuffles ending on a
+fractional pixel, Z16 shuffle source, reinterpreted reads of scaled targets, Z-format sprites clearing GL depth, bloom
+reads at internal scale (the "ghost"), CLAMP to TW x TH, point-sampled scaled targets, sprite edges like the GS,
+whole particles, GOW_ANISO=2..16 anisotropic filtering); 9499406 (the runtime's RPC/TLS/boot-mode guest pools moved
+from 0x01F00000 to the top of the private heap, out of the game's heap); 6d3379b (scratchpad DMA interleave mode);
+ac9dfaf (PSS audio to the stream type the game registered); e347878 (memory card file kept open between page
+writes); df2a082 (IOP sysclib strtok / thbase GetSystemTimeLow, warning for unhandled kernel imports).
+Left out: 5b1a25a (SetupThread argc/argv: God of War then loads its IRX as cdrom0:\...;1 and hangs at boot without
+the IOP path changes of 9ccffe1). Measured with 06 and 07 on the ship (Xeon E5-2666 v3, RX 580, 2x): image correct,
+combat 44-50 -> 55-60 fps.
+
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/iop_kernel.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/iop_kernel.cpp
+index e48d1f4..1e1ee78 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/iop_kernel.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/iop_kernel.cpp
+@@ -297,6 +297,10 @@ namespace ps2x::iop::detail
+         case 41:
+             setV0(0);
+             return true;
++        case 43: // GetSystemTimeLow: low word of the system timer, same units as GetSystemTime
++            // GoW2-Port: God of War II's smpd calls it around its disc reads.
++            setV0(static_cast<uint32_t>(currentCycle));
++            return true;
+         default:
+             return false;
+         }
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.cpp
+index 9a36f31..251195f 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.cpp
+@@ -8,6 +8,7 @@ namespace ps2x::iop::detail
+ {
+     void MemoryCard::insert(std::string path)
+     {
++        closeFile();
+         m_path = std::move(path);
+         m_present = true;
+         m_loaded = false;
+@@ -18,6 +19,7 @@ namespace ps2x::iop::detail
+ 
+     void MemoryCard::eject()
+     {
++        closeFile();
+         m_present = false;
+         m_loaded = false;
+         m_image.clear();
+@@ -50,23 +52,48 @@ namespace ps2x::iop::detail
+             return;
+         if (!m_fileExists)
+         {
+-            // Primera escritura: se crea el archivo con la imagen entera
+-            std::ofstream file(m_path, std::ios::binary | std::ios::trunc);
+-            if (!file)
++            // First write: the file is created with the whole image
++            closeFile();
++            m_file.open(m_path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
++            if (!m_file)
+             {
+                 std::cerr << "[SIO2] no se puede crear la memory card " << m_path << std::endl;
++                closeFile();
+                 return;
+             }
+-            file.write(reinterpret_cast<const char *>(m_image.data()), static_cast<std::streamsize>(m_image.size()));
+-            m_fileExists = static_cast<bool>(file);
++            m_file.write(reinterpret_cast<const char *>(m_image.data()), static_cast<std::streamsize>(m_image.size()));
++            m_file.flush();
++            m_fileExists = static_cast<bool>(m_file);
++            if (!m_fileExists)
++                closeFile();
+             std::cerr << "[SIO2] memory card creada en " << m_path << std::endl;
+             return;
+         }
+-        std::fstream file(m_path, std::ios::binary | std::ios::in | std::ios::out);
+-        if (!file)
+-            return;
+-        file.seekp(offset);
+-        file.write(reinterpret_cast<const char *>(m_image.data() + offset), static_cast<std::streamsize>(size));
++        if (!m_file.is_open())
++        {
++            m_file.open(m_path, std::ios::binary | std::ios::in | std::ios::out);
++            if (!m_file)
++            {
++                closeFile();
++                return;
++            }
++        }
++        m_file.seekp(offset);
++        m_file.write(reinterpret_cast<const char *>(m_image.data() + offset), static_cast<std::streamsize>(size));
++        // Flush to the OS on every write, so the card survives the runner being closed or crashing mid-save.
++        m_file.flush();
++        if (!m_file)
++        {
++            std::cerr << "[SIO2] error al escribir la memory card " << m_path << std::endl;
++            closeFile();
++        }
++    }
++
++    void MemoryCard::closeFile()
++    {
++        if (m_file.is_open())
++            m_file.close();
++        m_file.clear();
+     }
+ 
+     void MemoryCard::read(uint8_t *destination, size_t size)
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.h b/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.h
+index 86d7a84..0c1dd14 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/memory_card.h
+@@ -6,6 +6,7 @@
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
++#include <fstream>
+ #include <functional>
+ #include <string>
+ #include <vector>
+@@ -40,6 +41,7 @@ namespace ps2x::iop::detail
+     private:
+         void load();
+         void persist(uint32_t offset, size_t size);
++        void closeFile();
+ 
+         std::string m_path;
+         bool m_present = false;
+@@ -47,6 +49,9 @@ namespace ps2x::iop::detail
+         bool m_fileExists = false;
+         std::vector<uint8_t> m_image;
+         uint32_t m_address = 0;
++        // Kept open between writes: formatting or saving writes thousands of pages, and reopening the 8 MB image for
++        // each one made saving take tens of seconds (docs/NOTES.md, "Memory card: rendimiento").
++        std::fstream m_file;
+     };
+ 
+     // The two card slots; the image file of a slot is resolved on first use (GOW_MC0 / GOW_MC1 / Mcd001.ps2).
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.cpp b/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
+index 79609fe..f326dc2 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
+@@ -310,9 +310,44 @@ namespace ps2x::iop::detail
+                       : a0 + static_cast<uint32_t>(position));
+             return true;
+         }
+-        case 35: // strtok state is intentionally not shared across modules yet.
+-            setV0(0);
++        case 35: // strtok: one saved position, like the single static of the real sysclib
++        {
++            // GoW2-Port: God of War II's smpd splits its argument ("wad/,...,sound/") with strtok;
++            // returning 0 left all its search paths NULL.
++            uint32_t cursor = a0 != 0u ? a0 : m_strtokNext;
++            if (cursor == 0u)
++            {
++                setV0(0);
++                return true;
++            }
++            const std::string delimiters = m_memory.readString(a1, 4096u);
++            const auto isDelimiter = [&](uint8_t character)
++            {
++                return character != 0u && delimiters.find(static_cast<char>(character)) != std::string::npos;
++            };
++            while (isDelimiter(m_memory.read8(cursor)))
++                ++cursor;
++            if (m_memory.read8(cursor) == 0u)
++            {
++                m_strtokNext = 0u;
++                setV0(0);
++                return true;
++            }
++            const uint32_t token = cursor;
++            while (m_memory.read8(cursor) != 0u && !isDelimiter(m_memory.read8(cursor)))
++                ++cursor;
++            if (m_memory.read8(cursor) != 0u)
++            {
++                m_memory.write8(cursor, 0u);
++                m_strtokNext = cursor + 1u;
++            }
++            else
++            {
++                m_strtokNext = 0u;
++            }
++            setV0(token);
+             return true;
++        }
+         case 36:
+         case 38: // strtol / strtoul
+         {
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.h b/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.h
+index a462a6e..719eded 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/imports/iop_sysclib.h
+@@ -16,5 +16,6 @@ namespace ps2x::iop::detail
+ 
+     private:
+         IopMemory &m_memory;
++        uint32_t m_strtokNext = 0u; // GoW2-Port: strtok position for calls with a NULL string
+     };
+ }
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
+index 3316d40..d51eb63 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -338,30 +338,17 @@ namespace ps2x::iop::detail
+             if (iequals(call.library, "loadcore") && loadcore.dispatchImport(call.ordinal, cpu))
+                 return ImportDisposition::Handled;
+ 
+-            if (iequals(call.library, "thbase") || iequals(call.library, "threadman"))
+-            {
+-                return kernel.dispatchThreadImport(call.ordinal, cpu, totalCycles)
+-                           ? ImportDisposition::Handled
+-                           : ImportDisposition::Missing;
+-            }
+-            if (iequals(call.library, "thsemap"))
+-            {
+-                return kernel.dispatchSemaphoreImport(call.ordinal, cpu)
+-                           ? ImportDisposition::Handled
+-                           : ImportDisposition::Missing;
+-            }
+-            if (iequals(call.library, "thevent"))
+-            {
+-                return kernel.dispatchEventImport(call.ordinal, cpu)
+-                           ? ImportDisposition::Handled
+-                           : ImportDisposition::Missing;
+-            }
+-            if (iequals(call.library, "sifcmd"))
+-            {
+-                return rpc.dispatchSifCmdImport(call.ordinal, cpu)
+-                           ? ImportDisposition::Handled
+-                           : ImportDisposition::Missing;
+-            }
++            // GoW2-Port: an ordinal these libraries do not handle falls through to the "unhandled import"
++            // warning below (and returns 0) instead of failing silently with $v0 untouched.
++            if ((iequals(call.library, "thbase") || iequals(call.library, "threadman")) &&
++                kernel.dispatchThreadImport(call.ordinal, cpu, totalCycles))
++                return ImportDisposition::Handled;
++            if (iequals(call.library, "thsemap") && kernel.dispatchSemaphoreImport(call.ordinal, cpu))
++                return ImportDisposition::Handled;
++            if (iequals(call.library, "thevent") && kernel.dispatchEventImport(call.ordinal, cpu))
++                return ImportDisposition::Handled;
++            if (iequals(call.library, "sifcmd") && rpc.dispatchSifCmdImport(call.ordinal, cpu))
++                return ImportDisposition::Handled;
+             if (iequals(call.library, "intrman") && intrman.dispatchImport(call.ordinal, cpu, *this))
+                 return ImportDisposition::Handled;
+             if (iequals(call.library, "secrman"))
+@@ -402,7 +389,8 @@ namespace ps2x::iop::detail
+                 if (rpc.takeDmaCompletionCallback(callback))
+                     pendingGuestCallbacks.emplace(totalCycles + kSifDmaCompletionCycles,
+                                                   ScheduledGuestCallback{callback.function, callback.gp, callback.argument});
+-                return handled ? ImportDisposition::Handled : ImportDisposition::Missing;
++                if (handled)
++                    return ImportDisposition::Handled;
+             }
+             if (iequals(call.library, "vblank") && vblank.dispatchImport(call.ordinal, cpu, totalCycles))
+                 return ImportDisposition::Handled;
+@@ -416,12 +404,8 @@ namespace ps2x::iop::detail
+             }
+             if (iequals(call.library, "stdio") && stdio.dispatchImport(call.ordinal, cpu))
+                 return ImportDisposition::Handled;
+-            if (iequals(call.library, "sysclib"))
+-            {
+-                return sysclib.dispatchImport(call.ordinal, cpu)
+-                           ? ImportDisposition::Handled
+-                           : ImportDisposition::Missing;
+-            }
++            if (iequals(call.library, "sysclib") && sysclib.dispatchImport(call.ordinal, cpu))
++                return ImportDisposition::Handled;
+             if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
+                 return ImportDisposition::Handled;
+ 
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+index 5556200..a7cc7e5 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -1467,7 +1467,14 @@ namespace ps2_stubs
+                         // n, otherwise ADPCM) that the game's callback skips. The PCM runs on across packets of odd
+                         // lengths (God of War: 4073 / 4059 data bytes).
+                         const uint8_t subStream = payloadStart + 1u < packetEnd ? buffer[payloadStart + 1u] : 0u;
+-                        const bool pcm = streamId == kMpegPrivateStream1 && (subStream & 0xF0u) == 0xA0u;
++                        bool pcm = streamId == kMpegPrivateStream1 && (subStream & 0xF0u) == 0xA0u;
++                        // GOW-Port: the 0xAn sub-stream does not tell PCM from ADPCM. God of War II's movies carry
++                        // SPU2 ADPCM (SShd type 0x10) in FF A1 00 00 packets and the game only registers an ADPCM
++                        // callback; without it, its player waits for audio that never comes and drops the movie.
++                        // The packet goes to whichever audio stream type the game registered.
++                        if (matchingStreamCallbacks(mpegAddr, pcm ? kMpegStrPCM : kMpegStrADPCM).empty() &&
++                            !matchingStreamCallbacks(mpegAddr, pcm ? kMpegStrADPCM : kMpegStrPCM).empty())
++                            pcm = !pcm;
+                         // A/V check (GOW_MPEG_DIAG): the PTS of each stream's first audio packet
+                         static const bool s_audioPtsDiag = std::getenv("GOW_MPEG_DIAG") != nullptr;
+                         static std::map<uint32_t, bool> s_audioPtsSeen;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
+index 6204325..7ea2a3a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
+@@ -89,7 +89,7 @@ static uint32_t rpcAllocPacketAddr(uint8_t *rdram)
+         return 0;
+ 
+     uint32_t slot = g_rpc_packet_index++ % kRpcPacketPoolCount;
+-    uint32_t addr = kRpcPacketPoolBase + (slot * kRpcPacketSize);
++    uint32_t addr = kernelRpcPacketPoolBase() + (slot * kRpcPacketSize);
+     rpcZeroRdram(rdram, addr, kRpcPacketSize);
+     return addr;
+ }
+@@ -100,7 +100,7 @@ static uint32_t rpcAllocServerAddr(uint8_t *rdram)
+         return 0;
+ 
+     uint32_t slot = g_rpc_server_index++ % kRpcServerPoolCount;
+-    uint32_t addr = kRpcServerPoolBase + (slot * kRpcServerStride);
++    uint32_t addr = kernelRpcServerPoolBase() + (slot * kRpcServerStride);
+     rpcZeroRdram(rdram, addr, kRpcServerStride);
+     return addr;
+ }
+@@ -332,7 +332,7 @@ static uint32_t allocTlsAddr(uint8_t *rdram)
+ 
+     std::lock_guard<std::mutex> lock(g_tls_mutex);
+     uint32_t slot = g_tls_index++ % kTlsPoolCount;
+-    uint32_t addr = kTlsPoolBase + (slot * kTlsBlockSize);
++    uint32_t addr = kernelTlsPoolBase() + (slot * kTlsBlockSize);
+     rpcZeroRdram(rdram, addr, kTlsBlockSize);
+     return addr;
+ }
+@@ -346,7 +346,7 @@ static uint32_t allocBootModeAddr(uint8_t *rdram, size_t bytes)
+     if (g_bootmode_pool_offset + aligned > kBootModePoolBytes)
+         return 0;
+ 
+-    uint32_t addr = kBootModePoolBase + g_bootmode_pool_offset;
++    uint32_t addr = kernelBootModePoolBase() + g_bootmode_pool_offset;
+     g_bootmode_pool_offset += static_cast<uint32_t>(aligned);
+     rpcZeroRdram(rdram, addr, aligned);
+     return addr;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/State.h b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/State.h
+index d6b7549..dbfcec5 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/State.h
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/State.h
+@@ -242,23 +242,30 @@ inline std::filesystem::path g_host_cwd;
+ inline std::filesystem::path g_cdrom_cwd;
+ inline std::string g_ps2_cwd_device = "host0";
+ 
++// GOW-Port: guest RAM the runtime keeps for itself (RPC packets and server descriptors, TLS blocks, boot mode
++// entries). By default it sits at 0x01F00000, which is inside God of War II's own heap (it runs up to 0x01FF7FF8):
++// every SMPD call rewrote its server descriptor in the middle of the game's VU1 packets. setPrivateGuestHeap()
++// moves it to the top of the private heap (see ps2RelocateKernelPools).
+ static constexpr uint32_t kRpcPacketSize = 64;
+-static constexpr uint32_t kRpcPacketPoolBase = 0x01F00000;
+-static constexpr uint32_t kRpcPacketPoolBytes = 0x00010000;
++static constexpr uint32_t kRpcPacketPoolBytes = 0x00004000;
+ static constexpr uint32_t kRpcPacketPoolCount = kRpcPacketPoolBytes / kRpcPacketSize;
+-static constexpr uint32_t kRpcServerPoolBase = 0x01F10000;
+-static constexpr uint32_t kRpcServerPoolBytes = 0x00010000;
++static constexpr uint32_t kRpcServerPoolBytes = 0x00002000;
+ static constexpr uint32_t kRpcServerStride = 0x80;
+ static constexpr uint32_t kRpcServerPoolCount = kRpcServerPoolBytes / kRpcServerStride;
+ 
+-static constexpr uint32_t kTlsPoolBase = 0x01F20000;
+ static constexpr uint32_t kTlsPoolBytes = 0x00010000;
+ static constexpr uint32_t kTlsBlockSize = 0x100;
+ static constexpr uint32_t kTlsPoolCount = kTlsPoolBytes / kTlsBlockSize;
+ 
+-static constexpr uint32_t kBootModePoolBase = 0x01F30000;
+ static constexpr uint32_t kBootModePoolBytes = 0x00001000;
+ 
++static constexpr uint32_t kKernelPoolsBytes = kRpcPacketPoolBytes + kRpcServerPoolBytes + kTlsPoolBytes + kBootModePoolBytes;
++inline uint32_t g_kernelPoolsBase = 0x01F00000;
++inline uint32_t kernelRpcPacketPoolBase() { return g_kernelPoolsBase; }
++inline uint32_t kernelRpcServerPoolBase() { return g_kernelPoolsBase + kRpcPacketPoolBytes; }
++inline uint32_t kernelTlsPoolBase() { return kernelRpcServerPoolBase() + kRpcServerPoolBytes; }
++inline uint32_t kernelBootModePoolBase() { return kernelTlsPoolBase() + kTlsPoolBytes; }
++
+ static constexpr uint32_t kSifRpcModeNowait = 0x01;
+ static constexpr uint32_t kSifRpcModeNoWbDc = 0x02;
+ static constexpr size_t kMaxSifModulePathBytes = 260;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+index 07fcd29..063d80b 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+@@ -2,6 +2,16 @@
+ #include "RPC.h"
+ #include "../../ps2_iop_transport.h"
+ 
++// GOW-Port: puts the runtime's guest RAM pools (RPC packets/servers, TLS, boot mode) right below `top` and returns
++// their base. Called by PS2Runtime::setPrivateGuestHeap so they live in the private heap's range, not in the game's.
++uint32_t ps2RelocateKernelPools(uint32_t top)
++{
++    if (top < kKernelPoolsBytes)
++        return top;
++    g_kernelPoolsBase = (top - kKernelPoolsBytes) & ~0xFFu;
++    return g_kernelPoolsBase;
++}
++
+ namespace ps2_syscalls
+ {
+     namespace
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 486aa56..9ebf56a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -81,6 +81,8 @@ layout(location = 0, index = 1) out vec4 oBlend;
+ uniform sampler2D uTex;
+ uniform vec2 uTexSize;   // size the sampled image is normalised by (render targets: their own size)
+ uniform vec2 uTexDim;    // TEX0 TW/TH: size STQ coordinates are scaled by
++uniform vec2 uRtClamp;   // 1 per axis: a render target sampled in CLAMP mode, clamped to TW x TH rather than to the target
++uniform float uPxScale;  // internal scale: host pixels per PS2 pixel
+ 
+ // Reinterpreting fetch: the texture lives in the memory a render target was drawn into, but with another format / width /
+ // layout (16 bit view of a 32 bit target, T8H = alpha plane, other pitch...). The texel's GS memory address is computed
+@@ -116,7 +118,10 @@ uniform vec2 uRtPx;      // render target size in PS2 pixels
+ 
+ uint tab(uint i) { return texelFetch(uTables, ivec2(int(i & 2047u), int(i >> 11)), 0).r; }
+ 
+-vec4 reinterpretTexel(ivec2 p)
++// sub: where inside texel p the sample falls (0..1). The target is scaled: the host texel under that point is read, never
++// leaving the PS2 pixel that owns the texel, so a 1:1 reinterpreting copy (the alpha remaps through T8H of the frame)
++// keeps the scaled picture's edges instead of giving every host pixel of a PS2 pixel the same value.
++vec4 reinterpretTexel(ivec2 p, vec2 sub)
+ {
+     uint x = uint(p.x), y = uint(p.y);
+     uint psx = uint(uTexFmt.x), psy = uint(uTexFmt.y);
+@@ -138,7 +143,11 @@ vec4 reinterpretTexel(ivec2 p)
+     uint fbw = uint(uRtFmt2.z);
+     uint px = (rpage % fbw) * (1u << rpsx) + (e & ((1u << rpsx) - 1u));
+     uint py = (rpage / fbw) * (1u << rpsy) + (e >> rpsx);
+-    vec4 c = texture(uRtColor, (vec2(float(px), float(py)) + 0.5) / uRtPx) * 255.0;
++    vec2 hs = vec2(textureSize(uRtColor, 0)) / uRtPx; // host texels per PS2 pixel
++    vec2 own = vec2(float(px), float(py));
++    ivec2 lo = ivec2(floor(own * hs + 0.001)), hi = max(lo, ivec2(ceil((own + 1.0) * hs - 0.001)) - 1);
++    ivec2 hp = clamp(ivec2(floor((own + clamp(sub, 0.0, 1.0)) * hs + 0.001)), lo, hi);
++    vec4 c = texelFetch(uRtColor, hp, 0) * 255.0;
+     c = floor(c + 0.5);
+     uint word;
+     if (B == 32u)
+@@ -174,6 +183,7 @@ vec4 indexedTexel(ivec2 p)
+     return texelFetch(uIdxPalette, ivec2(idx, 0), 0);
+ }
+ uniform int uTme, uFst, uTfx, uTcc, uIip;
++uniform int uAniso; // anisotropic filtering: most bilinear taps per host pixel (1 = off)
+ uniform int uRtTex24; // sampling a render target as PSMCT24 (1) or PSMCT16 (2): alpha comes from TEXA
+ uniform float uTa0;
+ uniform float uTa1;
+@@ -230,6 +240,32 @@ void main()
+         // at the internal scale a pixel samples between the GS's sample points: keep it inside the range the GS samples
+         // (sprites), so filtering never reaches the texel beyond the primitive's last one
+         uv = clamp(uv, vUVClamp.xy, vUVClamp.zw);
++        // Point sampling a scaled render target: the GS takes texel floor(u) at the PS2 pixel's sample point, and the host
++        // pixels of that PS2 pixel take the host texels of that texel in the same order (inPx: where the host pixel lies
++        // inside its PS2 pixel, subPx: the matching place inside the texel). A 1:1 copy is then exact whatever the game's
++        // texel convention; taking floor(u) at each host pixel instead read one host texel to the right for copies at
++        // texel centres (u = x + 0.5): God of War II's depth haze, remapped from the frame's alpha through T8H, sat one
++        // host pixel off the picture and fringed every silhouette in blue.
++        vec2 stepX = dFdx(uv) * uPxScale, stepY = dFdy(uv) * uPxScale; // texel change per PS2 pixel
++        // From whole numbers, not fract(h / scale): the GPU divides through an approximate reciprocal, so h / 3 can land
++        // just below an integer and fract gave 0.999 for a host pixel that starts its PS2 pixel; it then read the host
++        // texel on its left. The T8H haze pass reads the target it writes, and at every strip seam that texel had already
++        // been written by the previous strip: the haze applied twice there, a bright line every 32 PS2 pixels at scale 3.
++        vec2 hostPx = gl_FragCoord.xy - 0.5;
++        vec2 ps2Px = floor(hostPx / uPxScale + 0.001);
++        vec2 inPx = (hostPx - ps2Px * uPxScale) / uPxScale;
++        vec2 dIn = inPx.x * stepX + inPx.y * stepY;
++        vec2 subPx = clamp(mix(dIn, 1.0 + dIn, lessThan(dIn, vec2(0.0))), 0.0, 0.999);
++        vec2 uvPs2 = floor((uv - dIn) * 16.0 + 0.015625) / 16.0; // the GS's coordinate at the sample point
++        // Anisotropic filtering (GOW_ANISO, uploaded textures with linear filtering), as the GPU does it: as many bilinear
++        // taps along the longer axis of the pixel's footprint as that axis is longer than the shorter one (at most uAniso),
++        // so a surface seen at a grazing angle averages the texels it covers instead of picking a few (shimmer and noise on
++        // floors and walls). A footprint shrunk the same on both axes keeps one tap. Done here because most of the game's
++        // textures are palettised and filtered by hand below.
++        bool anisoX = dot(stepX, stepX) >= dot(stepY, stepY);
++        vec2 anisoAxis = (anisoX ? stepX : stepY) / uPxScale;
++        float anisoMinor = length(anisoX ? stepY : stepX) / uPxScale;
++        int anisoTaps = uAniso > 1 ? clamp(int(ceil(length(anisoAxis) / max(anisoMinor, 1.0) - 0.01)), 1, uAniso) : 1;
+         // point sampling picks texel floor(u) of the GS's 1/16 texel coordinate: truncate like the GS (the 1/64 step
+         // absorbs float interpolation error, a 1:1 copy lands exactly on texel edges)
+         if (uLinear == 0)
+@@ -237,19 +273,25 @@ void main()
+         vec4 t;
+         if (uReinterp != 0)
+         {
+-            ivec2 ip = ivec2(floor(uv));
++            bool pt = uLinear == 0;
++            ivec2 ip = ivec2(floor(pt ? uvPs2 : uv));
+             ip = ivec2(clamp(ip.x, 0, uTex0.z - 1), clamp(ip.y, 0, uTex0.w - 1));
+-            t = reinterpretTexel(ip) * 255.0;
++            t = reinterpretTexel(ip, pt ? subPx : uv - floor(uv)) * 255.0;
+         }
+         else if (uIndexed != 0)
+         {
+             if (uLinear != 0)
+             {
+-                vec2 f = uv - 0.5;
+-                ivec2 i0 = ivec2(floor(f));
+-                vec2 w = f - floor(f);
+-                t = mix(mix(indexedTexel(i0), indexedTexel(i0 + ivec2(1, 0)), w.x),
+-                        mix(indexedTexel(i0 + ivec2(0, 1)), indexedTexel(i0 + ivec2(1, 1)), w.x), w.y) * 255.0;
++                t = vec4(0.0);
++                for (int i = 0; i < anisoTaps; ++i)
++                {
++                    vec2 f = uv + anisoAxis * ((float(i) + 0.5) / float(anisoTaps) - 0.5) - 0.5;
++                    ivec2 i0 = ivec2(floor(f));
++                    vec2 w = f - floor(f);
++                    t += mix(mix(indexedTexel(i0), indexedTexel(i0 + ivec2(1, 0)), w.x),
++                             mix(indexedTexel(i0 + ivec2(0, 1)), indexedTexel(i0 + ivec2(1, 1)), w.x), w.y);
++                }
++                t = t / float(anisoTaps) * 255.0;
+             }
+             else
+                 t = indexedTexel(ivec2(floor(uv))) * 255.0;
+@@ -257,7 +299,9 @@ void main()
+         else if (uZTex != 0)
+         {
+             vec2 zhost = vec2(textureSize(uTex, 0)); // depth is always point sampled: the host texel's centre
+-            float zf = texture(uTex, (floor(uv * zhost / uTexSize + 0.001) + 0.5) / zhost).r;
++            vec2 zk = zhost / uTexSize;
++            vec2 zp = (zk.x > 1.0 || zk.y > 1.0) ? floor((floor(uvPs2) + subPx) * zk + 0.001) : floor(uv * zk + 0.001);
++            float zf = texture(uTex, (zp + 0.5) / zhost).r;
+             uint zi = uint(clamp(zf, 0.0, 1.0) * uZMax + 0.5);
+             if (uZTex == 16)
+             {
+@@ -271,10 +315,42 @@ void main()
+         {
+             // the centre of the host texel (render targets are scaled) inside texel floor(u): never on a texel edge
+             vec2 host = vec2(textureSize(uTex, 0));
+-            t = texture(uTex, (floor(uv * host / uTexSize + 0.001) + 0.5) / host) * 255.0;
++            vec2 k = host / uTexSize;
++            vec2 hp;
++            if (k.x > 1.0 || k.y > 1.0)
++            {
++                vec2 tp = floor(mix(uvPs2, clamp(uvPs2, vec2(0.0), uTexDim - 1.0 / 64.0), uRtClamp));
++                hp = floor((tp + subPx) * k + 0.001);
++            }
++            else
++                hp = floor(uv * k + 0.001);
++            t = texture(uTex, (hp + 0.5) / host) * 255.0;
+         }
+         else
+-            t = texture(uTex, uv / uTexSize) * 255.0;
++        {
++            // A render target drawn at scale k holds in host texel j what the GS drew at pixel j / k (see addVertex), which
++            // read back as a texture lies at u = j / k + 0.5; GL filtering takes texel j to be at (j + 0.5) / k. Shifting u
++            // by 0.5 - 0.5 / k makes the filter blend the texels the GS blends: unshifted, every filtered read of a scaled
++            // target took its picture from 0.5 - 0.5 / k texels to the right, and a chain of them (God of War II's bloom:
++            // halve the frame twice, blur, enlarge, add it back) left the glow several pixels to the left of what casts it.
++            // Uploaded textures (k = 1) are unchanged.
++            // In CLAMP mode the GS clamps each tap to TW x TH, which for a render target can be smaller than the target:
++            // God of War II keeps its bloom images of 64, 128 and 256 pixels side by side in one target and reads them in
++            // CLAMP mode; clamped at the target's edge instead, the filter blended the neighbouring image into the last
++            // column (a bright band along the right edge of the screen). Clamping the coordinate to the outermost texel
++            // centres is the same as clamping both taps.
++            uv = mix(uv, clamp(uv, vec2(0.5), uTexDim - 0.5), uRtClamp);
++            vec2 k = vec2(textureSize(uTex, 0)) / uTexSize;
++            if (anisoTaps > 1) // only uploaded textures (k = 1)
++            {
++                t = vec4(0.0);
++                for (int i = 0; i < anisoTaps; ++i)
++                    t += textureLod(uTex, (uv + anisoAxis * ((float(i) + 0.5) / float(anisoTaps) - 0.5)) / uTexSize, 0.0);
++                t = t / float(anisoTaps) * 255.0;
++            }
++            else
++                t = texture(uTex, (uv - 0.5 + 0.5 / k) / uTexSize) * 255.0;
++        }
+         t = floor(t + 0.5);
+         if (uRtTex24 == 1)
+             t.a = (uAem != 0 && t.r + t.g + t.b == 0.0) ? 0.0 : uTa0;
+@@ -410,7 +486,7 @@ uniform usampler2D uCoords;
+ void main()
+ {
+     uvec2 c = texelFetch(uCoords, ivec2(int(gl_FragCoord.x), 0), 0).rg;
+-    oColor = reinterpretTexel(ivec2(c));
++    oColor = reinterpretTexel(ivec2(c), vec2(0.5));
+ }
+ )";
+ 
+@@ -478,7 +554,7 @@ struct GSHwBackend::Impl
+     float scale = 2.0f;
+     GLuint program = 0, vao = 0, vbo = 0;
+     GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+-          locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
++          locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locRtClamp = -1, locPxScale = -1, locAniso = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
+           locRtFmt = -1, locRtFmt2 = -1, locTex0 = -1, locRtPx = -1, locAem = -1;
+     GLint locIndexed = -1, locLinear = -1, locWrap = -1, locIdxPalette = -1;
+     GLint locSwBlend = -1, locColClamp = -1, locAbcd = -1, locFix = -1, locZAlias = -1, locZAliasWrite = -1, locZAliasMax = -1;
+@@ -639,7 +715,7 @@ struct GSHwBackend::Impl
+         locIndexed = loc("uIndexed"); locLinear = loc("uLinear"); locWrap = loc("uWrap"); locIdxPalette = loc("uIdxPalette");
+         locSwBlend = loc("uSwBlend"); locColClamp = loc("uColClamp"); locAbcd = loc("uAbcd"); locFix = loc("uFix");
+         locZAlias = loc("uZAlias"); locZAliasWrite = loc("uZAliasWrite"); locZAliasMax = loc("uZAliasMax");
+-        locRtTex24 = loc("uRtTex24"); locTa0 = loc("uTa0"); locTa1 = loc("uTa1"); locAem = loc("uAem");
++        locRtTex24 = loc("uRtTex24"); locRtClamp = loc("uRtClamp"); locPxScale = loc("uPxScale"); locAniso = loc("uAniso"); locTa0 = loc("uTa0"); locTa1 = loc("uTa1"); locAem = loc("uAem");
+ 
+         g.GenVertexArrays(1, &vao);
+         g.BindVertexArray(vao);
+@@ -1373,12 +1449,20 @@ struct GSHwBackend::Impl
+         // a Z16 view reads a Z buffer, or a colour target laid out as Z (the address mapping covers both)
+         RenderTarget *src = nullptr;
+         bool srcDepth = false;
++        // several targets may share that Z memory (God of War II: the frame's 512 px wide target and a 128 px wide
++        // one): take the one laid out with the view's width, the latest depth writer among equals
+         if (zTex)
+             for (RenderTarget &t : targets)
+                 if (t.depth && t.zbp == c.tex0.tbp0 / 32u && t.fbp != t.zbp)
+                 {
+-                    src = &t;
+-                    srcDepth = true;
++                    const bool widthMatches = t.fbw == c.tex0.tbw;
++                    const bool srcWidthMatches = src && src->fbw == c.tex0.tbw;
++                    if (!src || (widthMatches && !srcWidthMatches) ||
++                        (widthMatches == srcWidthMatches && t.lastDepthSeq >= src->lastDepthSeq))
++                    {
++                        src = &t;
++                        srcDepth = true;
++                    }
+                 }
+         if (!src)
+             if (RenderTarget *t = findTarget(c.tex0.tbp0 / 32u))
+@@ -1390,17 +1474,21 @@ struct GSHwBackend::Impl
+         const GSVertex &a = b.vertices[0], &e = b.vertices[1];
+         const float ofx = c.xyoffset.ofx / 16.0f, ofy = c.xyoffset.ofy / 16.0f;
+         const float fx0 = std::min(a.x, e.x) - ofx, fx1 = std::max(a.x, e.x) - ofx, fy0 = std::min(a.y, e.y) - ofy, fy1 = std::max(a.y, e.y) - ofy;
++        // the start must be a whole pixel; the end may be fractional: the GS covers x0 <= x < x1, so the last covered pixel
++        // is ceil(x1) - 1 (God of War II ends its full-height column copies at y = 895.4375, i.e. 896 rows)
+         const auto whole = [](float v) { return std::fabs(v - std::round(v)) < 1e-3f && v >= 0.0f; };
+-        if (!whole(fx0) || !whole(fx1) || !whole(fy0) || !whole(fy1))
++        if (!whole(fx0) || !whole(fy0) || fx1 < 0.0f || fy1 < 0.0f)
+             { shuffleWhy = 9; return false; }
+-        const int x0 = static_cast<int>(std::lround(fx0)), x1 = static_cast<int>(std::lround(fx1));
+-        const int y0 = static_cast<int>(std::lround(fy0)), y1 = static_cast<int>(std::lround(fy1));
++        const int x0 = static_cast<int>(std::lround(fx0)), x1 = static_cast<int>(std::ceil(fx1 - 1e-3f));
++        const int y0 = static_cast<int>(std::lround(fy0)), y1 = static_cast<int>(std::ceil(fy1 - 1e-3f));
+         const GSVertex &left = (a.x <= e.x) ? a : e;
+         const GSVertex &top = (a.y <= e.y) ? a : e;
+         const int du = static_cast<int>(std::floor(left.u / 16.0f)) - x0, dv = static_cast<int>(std::floor(top.v / 16.0f)) - y0;
+-        const int uSpan = static_cast<int>(std::lround(std::fabs(static_cast<float>(a.u) - static_cast<float>(e.u)) / 16.0f));
+-        const int vSpan = static_cast<int>(std::lround(std::fabs(static_cast<float>(a.v) - static_cast<float>(e.v)) / 16.0f));
+-        if (((x0 | x1 | y0 | y1 | du | dv) & 7) != 0 || x1 <= x0 || y1 <= y0 || uSpan != x1 - x0 || vSpan != y1 - y0)
++        // texels 1:1: the texture span equals the position span (both in 1/16 units)
++        const float uSpan = std::fabs(static_cast<float>(a.u) - static_cast<float>(e.u)) / 16.0f;
++        const float vSpan = std::fabs(static_cast<float>(a.v) - static_cast<float>(e.v)) / 16.0f;
++        if (((x0 | x1 | y0 | y1 | du | dv) & 7) != 0 || x1 <= x0 || y1 <= y0 || std::fabs(uSpan - (fx1 - fx0)) > 1e-2f ||
++            std::fabs(vSpan - (fy1 - fy0)) > 1e-2f)
+             { shuffleWhy = 10; return false; }
+         if (x0 + du < 0 || y0 + dv < 0 || x0 < static_cast<int>(c.scissor.x0) || y0 < static_cast<int>(c.scissor.y0) ||
+             x1 - 1 > static_cast<int>(c.scissor.x1) || y1 - 1 > static_cast<int>(c.scissor.y1))
+@@ -1531,6 +1619,94 @@ struct GSHwBackend::Impl
+                      c.scissor.x0, c.scissor.x1, c.scissor.y0, c.scissor.y1);
+     }
+ 
++    static bool isZFormat(uint8_t psm) { return psm == 0x30 || psm == 0x31 || psm == 0x32 || psm == 0x3A; }
++
++    // Whether target t's Z buffer memory contains page `page` of a buffer `fbw` wide, and the PS2 row that page starts on in
++    // that Z buffer (a buffer starting further into the memory addresses lower rows of the same Z buffer). Several targets
++    // can have their GL depth attached to the same Z memory (the frame and the post passes drawn with the same ZBUF).
++    static bool depthRowOf(const RenderTarget &t, uint32_t page, uint32_t fbw, uint8_t zpsm, int &rowOffset)
++    {
++        if (!t.depth || page < t.zbp || std::max<uint32_t>(fbw, 1u) != t.fbw)
++            return false;
++        const uint32_t delta = page - t.zbp;
++        if (delta % t.fbw != 0u)
++            return false;
++        rowOffset = static_cast<int>(delta / t.fbw) * ((zpsm == 0x32 || zpsm == 0x3A) ? 64 : 32);
++        return rowOffset < static_cast<int>(t.pxH);
++    }
++
++    // GoW2-Port: an untextured sprite drawn with a Z format into the memory of a target's Z buffer (FRAME.PSM =
++    // PSMZ32/24/16, FRAME.FBP inside that memory) writes Z words directly. God of War II clears its Z buffer this way between
++    // the sky and the world, so the sky leaves its colour but not its depth: 512x224 sprites write Z = 0 to the top half
++    // through FRAME (0x78) and, with their own ZBUF at 0xB0 (ZTST ALWAYS), to the bottom half through the Z write. Both
++    // writes go to the GL depth buffer of the target that owns that memory, inside the sprite and the scissor. Returns
++    // false when nothing of the sprite lands in a Z buffer.
++    bool depthClearSprite(const GSDrawState &s, const GSPrimitiveBatch &b)
++    {
++        const GSContext &c = s.context;
++        if (s.prim.tme || c.frame.fbmsk != 0u)
++            return false;
++        const GSVertex &v = b.vertices[1]; // sprites take their colour and Z from the second vertex
++        const bool zWrites = ((c.test >> 16) & 1u) != 0u && ((c.test >> 17) & 3u) == 1u && !c.zbuf.zmask;
++        bool any = false;
++        for (const RenderTarget &t : targets)
++        {
++            int row = 0;
++            any = any || depthRowOf(t, c.frame.fbp, c.frame.fbw, c.frame.psm, row) ||
++                  (zWrites && depthRowOf(t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row));
++        }
++        if (!any)
++            return false;
++        flushPending();
++        if (!ensure())
++            return true;
++        double frameZ;
++        if (c.frame.psm == 0x32 || c.frame.psm == 0x3A) // Z16: the colour packs like PSMCT16
++            frameZ = static_cast<double>((v.r >> 3) | ((v.g >> 3) << 5) | ((v.b >> 3) << 10) | ((v.a >> 7) << 15));
++        else
++            frameZ = static_cast<double>(static_cast<uint32_t>(v.r) | (static_cast<uint32_t>(v.g) << 8) | (static_cast<uint32_t>(v.b) << 16) |
++                                         (c.frame.psm == 0x30 ? (static_cast<uint32_t>(v.a) << 24) : 0u));
++        const float ox = static_cast<float>(c.xyoffset.ofx) / 16.0f, oy = static_cast<float>(c.xyoffset.ofy) / 16.0f;
++        // the sprite covers pixels [ceil(x0), ceil(x1)) like the GS, clipped by the scissor (inclusive bounds)
++        const int x0 = std::max<int>(c.scissor.x0, static_cast<int>(std::ceil(std::min(b.vertices[0].x, v.x) - ox)));
++        const int y0 = std::max<int>(c.scissor.y0, static_cast<int>(std::ceil(std::min(b.vertices[0].y, v.y) - oy)));
++        const int x1 = std::min<int>(c.scissor.x1 + 1, static_cast<int>(std::ceil(std::max(b.vertices[0].x, v.x) - ox)));
++        const int y1 = std::min<int>(c.scissor.y1 + 1, static_cast<int>(std::ceil(std::max(b.vertices[0].y, v.y) - oy)));
++        if (x1 <= x0 || y1 <= y0)
++            return true;
++        const Api &g = gl();
++        const auto clearRows = [&](RenderTarget &t, int rowOffset, double z, uint8_t zpsm)
++        {
++            const int ty0 = y0 + rowOffset, ty1 = std::min<int>(y1 + rowOffset, static_cast<int>(t.pxH));
++            if (ty1 <= ty0)
++                return;
++            g.BindFramebuffer(kFramebuffer, t.fbo);
++            g.Viewport(0, 0, t.glW, t.glH);
++            g.Enable(kScissorTest);
++            g.Scissor(static_cast<GLint>(std::floor(x0 * scale)), static_cast<GLint>(std::floor(ty0 * scale)),
++                      static_cast<GLsizei>(std::ceil((x1 - x0) * scale)), static_cast<GLsizei>(std::ceil((ty1 - ty0) * scale)));
++            g.DepthMask(kTrue);
++            g.ClearDepth(std::min(std::max(z, 0.0) / static_cast<double>(zMaxFor(zpsm)), 1.0));
++            g.Clear(kDepthBufferBit);
++            g.Disable(kScissorTest);
++            t.lastDepthSeq = ++writeSeq;
++            // the memory now holds these literal values, not an inverted Z buffer
++            const auto inv = std::find(invertedZ.begin(), invertedZ.end(), t.zbp);
++            if (inv != invertedZ.end())
++                invertedZ.erase(inv);
++        };
++        for (RenderTarget &t : targets)
++        {
++            int row = 0;
++            if (depthRowOf(t, c.frame.fbp, c.frame.fbw, c.frame.psm, row))
++                clearRows(t, row, frameZ, c.frame.psm);
++            if (zWrites && depthRowOf(t, c.zbuf.zbp, c.frame.fbw, c.zbuf.psm, row))
++                clearRows(t, row, std::min(v.z, static_cast<double>(zMaxFor(c.zbuf.psm))), c.zbuf.psm);
++        }
++        ++stats.draws;
++        return true;
++    }
++
+     void submit(const GSPrimitiveBatch &b)
+     {
+         const GSDrawState &s = b.state;
+@@ -1548,6 +1724,8 @@ struct GSHwBackend::Impl
+         if (family16(fpsm) && tryShuffle(s, b))
+             return;
+         flushShuffle();
++        if (isZFormat(fpsm) && sprite && depthClearSprite(s, b))
++            return;
+         if (fpsm != GS_PSM_CT32 && fpsm != GS_PSM_CT24 && fpsm != GS_PSM_CT16 && fpsm != GS_PSM_CT16S)
+         {
+             ++stats.skippedPsm;
+@@ -1641,8 +1819,34 @@ struct GSHwBackend::Impl
+             GSDrawState sp = s; // sprites carry texel UVs, never STQ
+             (void)sp;
+             GSVertex corner[4] = {a, a, a, a};
+-            const float xs[2] = {a.x, c.x}, ys[2] = {a.y, c.y};
+-            const float us[2] = {u0, u1}, vs[2] = {v0, v1};
++            // The GS covers pixel n when x0 <= n < x1, so an edge between two pixels covers what the next whole pixel would.
++            // Left there, at the internal scale it drew a fraction of a PS2 pixel: God of War II's water and underworld
++            // distortion copies the frame in vertical strips that end at x + 0.5 while the next one starts at x + 1, which
++            // left a column of host pixels unpainted at every seam (dark wavy lines; PCSX2's alignSprite, "Fixes water
++            // vertical lines", widens such sprites). Both edges go to the pixels the GS covers, in window space, and the
++            // texel coordinates follow at the same texels per pixel; scale 1 is unchanged.
++            float xs[2] = {a.x, c.x}, ys[2] = {a.y, c.y};
++            float us[2] = {u0, u1}, vs[2] = {v0, v1};
++            // returns false when the sprite covers no pixel on the GS along that axis
++            const auto snap = [](float (&p)[2], float (&t)[2], float off)
++            {
++                const float w0 = p[0] - off, w1 = p[1] - off;
++                const float s0 = std::ceil(w0), s1 = std::ceil(w1);
++                if (w0 == w1 || s0 == s1)
++                    return false;
++                const float k = (t[1] - t[0]) / (w1 - w0);
++                t[0] += (s0 - w0) * k;
++                t[1] += (s1 - w1) * k;
++                p[0] = s0 + off;
++                p[1] = s1 + off;
++                return true;
++            };
++            const bool coversX = snap(xs, us, s.context.xyoffset.ofx / 16.0f);
++            const bool coversY = snap(ys, vs, s.context.xyoffset.ofy / 16.0f);
++            // a sprite that paints no pixel on the GS is not drawn (at the internal scale it still got host pixels: more
++            // of the additive bubbles than the PS2 shows)
++            if (!coversX || !coversY)
++                return;
+             // the texel coordinates of the first and last pixel the GS covers (pixel n is covered when lo <= n < hi);
+             // a sprite covering no pixel on the GS keeps its whole range
+             const auto sampled = [](float p0, float p1, float t0, float t1, float &lo, float &hi)
+@@ -1666,6 +1870,15 @@ struct GSHwBackend::Impl
+             SpriteEdges cur{{xs[0], xs[1]}, {ys[0], ys[1]}, {us[0], us[1]}, {vs[0], vs[1]}};
+             if (lastSprite.batch == batchSerial && lastSprite.end == pending.size() && lastSprite.end >= 6)
+                 openSharedSide(lastSprite.edges, cur, &pending[lastSprite.end - 6], cu0, cu1, cv0, cv1);
++            // A sprite that shrinks its texture a lot (particles: God of War II's bubbles are 2-pixel sprites of a 32-texel
++            // bubble) is sampled by the GS at one or two texels; clamped to those, at the internal scale it showed a cut
++            // piece of the picture (square fragments instead of round bubbles). Such sprites keep the whole range, as in
++            // PCSX2; the bloom's halvings (2 texels per pixel) stay clamped.
++            constexpr float kShrinkUnclamped = 4.0f;
++            if (a.x != c.x && std::fabs((u1 - u0) / (c.x - a.x)) > kShrinkUnclamped)
++                cu0 = -1e30f, cu1 = 1e30f;
++            if (a.y != c.y && std::fabs((v1 - v0) / (c.y - a.y)) > kShrinkUnclamped)
++                cv0 = -1e30f, cv1 = 1e30f;
+             const int order[6][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 0}, {1, 1}, {0, 1}};
+             for (const auto &o : order)
+             {
+@@ -2016,6 +2229,11 @@ struct GSHwBackend::Impl
+             g.Uniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
+             g.Uniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
+             g.Uniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
++            g.Uniform2f(locRtClamp, src && (c.clamp & 3u) == 1u ? 1.0f : 0.0f, src && ((c.clamp >> 2) & 3u) == 1u ? 1.0f : 0.0f);
++            g.Uniform1f(locPxScale, scale);
++            // GOW_ANISO=2..16: anisotropic filtering of uploaded textures (render targets are read as the GS reads them)
++            static const int aniso = [] { const char *v = std::getenv("GOW_ANISO"); return v ? std::clamp(std::atoi(v), 1, 16) : 1; }();
++            g.Uniform1i(locAniso, !(src || rsrc || zsrc) && s.linearFilter ? aniso : 1);
+             g.Uniform1i(locReinterp, rsrc ? 1 : 0);
+             if (rsrc)
+                 setupReinterpret(s, *rsrc);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+index 5a0c9fb..ccc063d 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1598,9 +1598,8 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+     // los paquetes de VU1 quedaban a cero y los personajes se dibujaban como polígonos gigantes.
+     if (mode == 1u)
+         return processScratchpadChain(channelBase, chcr);
+-    if (mode != 0u)
++    if (mode != 0u && mode != 2u)
+     {
+-        // GOW-Port: interleave (MOD=2) is not implemented; report it so a missing transfer is visible.
+         static unsigned reports = 0u;
+         if (++reports <= 20u)
+             std::fprintf(stderr, "[dma] SPR %s mode %u not handled (chcr=%08x qwc=%u madr=%08x sadr=%04x)\n",
+@@ -1611,49 +1610,66 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+     }
+ 
+     const uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
+-    const uint32_t byteCount = qwc * 16u;
+-    const uint32_t originalMadr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
+     const uint32_t originalSadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
++    uint32_t madr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
+ 
+-    uint32_t mainOffset = 0u;
+-    try
+-    {
+-        mainOffset = translateAddress(originalMadr);
+-    }
+-    catch (const std::exception &)
++    // GOW-Port: interleave mode (MOD=2, scratchpad channels only): blocks of D_SQWC.TQWC quadwords, skipping
++    // D_SQWC.SQWC quadwords of main memory after each block, while the scratchpad address runs on (EE DMAC spec;
++    // PCSX2 _SPR0interleave / _SPR1interleave, TQWC 0 = the whole transfer). God of War II de-interleaves its stereo
++    // movie audio this way (0x1901E8); without it the SPU2 got the same stale buffer every time (a constant beep).
++    // Normal mode is one block of QWC quadwords.
++    uint32_t tqwc = qwc;
++    uint32_t sqwc = 0u;
++    if (mode == 2u)
+     {
+-        return false;
++        const auto it = m_ioRegisters.find(0x1000E030u); // D_SQWC
++        const uint32_t sqwcReg = it != m_ioRegisters.end() ? it->second : 0u;
++        sqwc = sqwcReg & 0xFFu;
++        tqwc = (sqwcReg >> 16u) & 0xFFu;
++        if (tqwc == 0u)
++            tqwc = qwc;
+     }
+ 
+-    if (mainOffset > PS2_RAM_SIZE || byteCount > PS2_RAM_SIZE - mainOffset)
+-        return false;
+-
+     const bool fromScratchpad = channelBase == kSprFromChannel;
+     uint32_t scratchOffset = originalSadr;
+-    uint32_t bytesLeft = byteCount;
+-    uint32_t copied = 0u;
+-    while (bytesLeft != 0u)
++    for (uint32_t left = qwc; left != 0u;)
+     {
+-        const uint32_t scratchChunk = PS2_SCRATCHPAD_SIZE - scratchOffset;
+-        const uint32_t chunk = std::min(bytesLeft, scratchChunk);
+-        if (fromScratchpad)
++        const uint32_t blockQwc = std::min(left, tqwc);
++        const uint32_t blockBytes = blockQwc * 16u;
++        uint32_t mainOffset = 0u;
++        try
+         {
+-            std::memcpy(m_rdram + mainOffset + copied, m_scratchpad + scratchOffset, chunk);
+-            markModified(mainOffset + copied, chunk);
++            mainOffset = translateAddress(madr);
+         }
+-        else
++        catch (const std::exception &)
+         {
+-            std::memcpy(m_scratchpad + scratchOffset, m_rdram + mainOffset + copied, chunk);
++            return false;
+         }
++        if (mainOffset > PS2_RAM_SIZE || blockBytes > PS2_RAM_SIZE - mainOffset)
++            return false;
+ 
+-        copied += chunk;
+-        bytesLeft -= chunk;
+-        scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
++        for (uint32_t copied = 0u; copied < blockBytes;)
++        {
++            const uint32_t chunk = std::min(blockBytes - copied, PS2_SCRATCHPAD_SIZE - scratchOffset);
++            if (fromScratchpad)
++            {
++                std::memcpy(m_rdram + mainOffset + copied, m_scratchpad + scratchOffset, chunk);
++                markModified(mainOffset + copied, chunk);
++            }
++            else
++            {
++                std::memcpy(m_scratchpad + scratchOffset, m_rdram + mainOffset + copied, chunk);
++            }
++            copied += chunk;
++            scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
++        }
++        left -= blockQwc;
++        madr = (madr + blockBytes + sqwc * 16u) & 0x7FFFFFF0u;
+     }
+ 
+-    m_ioRegisters[channelBase + 0x10u] = (originalMadr + byteCount) & 0x7FFFFFF0u;
++    m_ioRegisters[channelBase + 0x10u] = madr;
+     m_ioRegisters[channelBase + 0x20u] = 0u;
+-    m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
++    m_ioRegisters[channelBase + 0x80u] = scratchOffset & 0x3FF0u;
+     queueCompletedDmacCause(fromScratchpad ? 8u : 9u);
+     return true;
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 2742990..f7b79aa 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2187,9 +2187,15 @@ uint32_t PS2Runtime::guestHeapLimit() const
+     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
+ }
+ 
++uint32_t ps2RelocateKernelPools(uint32_t top); // Kernel/Syscalls/RPC.cpp
++
+ void PS2Runtime::setPrivateGuestHeap(uint32_t base, uint32_t limit)
+ {
+     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    // GOW-Port: the runtime's RPC/TLS pools take the top of the private range (they used to sit at 0x01F00000,
++    // inside the game's heap).
++    if (limit > base)
++        limit = std::max(base, ps2RelocateKernelPools(limit));
+     m_privateGuestHeapBase = base;
+     m_privateGuestHeapLimit = limit;
+     // Si el heap ya existe y no tiene bloques en uso, se mueve ya; si no, al siguiente SetupHeap.

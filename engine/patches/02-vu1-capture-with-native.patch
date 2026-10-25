@@ -1,0 +1,18 @@
+VU1 microcode capture (GOW_VU1_CAPTURA) also while the native VU1 backend runs: the optimize stage recorded
+nothing without it. From KIexster/god-of-war-recomp patches/ps2recomp-vu1-captura-nativa.patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 44641af..3e8308c 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -2188,6 +2188,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     }
+     if (m_unit == Unit::VU1 && m_native && m_native->enabled && vuData && codeSize == PS2_VU1_CODE_SIZE)
+     {
++        // GOW_VU1_CAPTURA records also while the native VU1 runs (compiledProgramFor saves the micro-memory).
++        static const bool captureWithNative = std::getenv("GOW_VU1_CAPTURA") != nullptr;
++        if (captureWithNative)
++            (void)compiledProgramFor(vuCode, codeSize, memory);
+         if (!runNativeLoop(context))
+             runExact(context);
+     }

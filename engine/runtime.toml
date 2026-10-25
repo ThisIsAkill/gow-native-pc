@@ -1,0 +1,14 @@
+# The native runtime this project builds on. It is NOT stored in this repository: the pipeline (tools/pipeline/build.ps1,
+# stage "fetch") or the launcher's Install tab clones it into engine/runtime/ at the pinned commit and applies
+# engine/patches/*.patch in file-name order. It is required: without it nothing can be recompiled or run.
+#
+# What the runtime contains (all GPL-3.0, see CREDITS.md):
+#   PS2Recomp/   ran-j/PS2Recomp: the MIPS R5900 -> C++ static recompiler (ps2xRecomp) and the native PS2 runtime
+#                (ps2xRuntime, ps2xIOP), as extended by Waffle565 (native GS renderer, native VU1/IOP code, sound, pad,
+#                memory card), KIexster's patch stack and YYOzcan's Tobiichi changes
+#   src/         God of War's overrides (gow_overrides.cpp and headers) used by the recompiled game
+#   config/      God of War's recompiler configuration and function map
+#   tools/       VU1 / IOP native-code generators
+repository = "https://github.com/YYOzcan/Tobiichi-Port"
+commit = "471c83180a8df575cff4abd3fae6c043b5096925"   # 2026-10-16
+upstream_recompiler = "https://github.com/ran-j/PS2Recomp"

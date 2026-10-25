@@ -1,0 +1,50 @@
+PS2X_RELEASE_LTCG option (ReleaseMode.cmake): /GL + /LTCG only when ON. MSVC's LTCG link of ~6,400 generated functions
+ran > 2.5 h in one thread on a 10-core Xeon; the pipeline builds Release with it OFF (every other Release flag stays).
+
+diff --git a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+index 6dce58c..b1e12e2 100644
+--- a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
++++ b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+@@ -6,6 +6,9 @@ check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
+ # usa 1-2 GB: en un equipo de 8-16 GB se quedaba sin memoria. PS2X_LTO_JOBS=N lo limita (los instaladores lo eligen
+ # según la memoria); vacío = el comportamiento de CMake.
+ set(PS2X_LTO_JOBS "" CACHE STRING "GCC/Clang: procesos del enlace con LTO (vacío = todos los núcleos)")
++# God-Of-War-Native-Port setup: /GL + /LTCG (whole-program optimisation) for Release. MSVC's LTCG link of the ~6,400
++# generated functions ran for hours in one thread on a 10-core Xeon; OFF keeps every other Release flag.
++option(PS2X_RELEASE_LTCG "Release: whole-program optimisation (/GL, /LTCG, IPO)" ON)
+ 
+ function(EnableFastReleaseMode TargetName)
+     message("> Enabling optimization for: ${TargetName}")
+@@ -15,7 +18,6 @@ function(EnableFastReleaseMode TargetName)
+                 /O2 # speed
+                 /Ob2 # inline aggressively
+                 /Oi # intrinsics
+-                /GL # whole program opt
+                 /Gy # function-level linking
+                 /Gw # global data in COMDAT
+                 /GF # string pooling
+@@ -31,15 +33,22 @@ function(EnableFastReleaseMode TargetName)
+         if(TARGET ${TargetName})
+             target_link_options(${TargetName} PRIVATE
+                 $<$<CONFIG:Release>:
+-                    /LTCG # link-time code generation
+                     /OPT:REF # remove unreferenced
+                     /OPT:ICF # fold identical COMDATs
+                 >
+             )
+         endif()
++        if(PS2X_RELEASE_LTCG)
++            target_compile_options(${TargetName} PRIVATE $<$<CONFIG:Release>:/GL>) # whole program opt
++            if(TARGET ${TargetName})
++                target_link_options(${TargetName} PRIVATE $<$<CONFIG:Release>:/LTCG>) # link-time code generation
++            endif()
++        endif()
+     endif()
+ 
+-    if(IPO_SUPPORTED)
++    if(NOT PS2X_RELEASE_LTCG)
++        message(STATUS "LTCG off for ${TargetName} (PS2X_RELEASE_LTCG=OFF)")
++    elseif(IPO_SUPPORTED)
+         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+         if(NOT MSVC AND PS2X_LTO_JOBS)
+             target_link_options(${TargetName} PRIVATE $<$<CONFIG:Release>:-flto=${PS2X_LTO_JOBS}>)

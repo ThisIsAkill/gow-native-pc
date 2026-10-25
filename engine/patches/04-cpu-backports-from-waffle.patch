@@ -1,0 +1,1865 @@
+CPU-side speed-ups backported from Waffle565/God-Of-War-Native-Port (runtime/switch branches, 2026-10-16..18) onto the
+Tobiichi runtime: ecd6cb5 615b046 cba2dfc a4ff9ee 20634cd 7ffd30a abb0172 a92a453 d88bf4d 9d51673 (EE checkpoint fast
+path, VIF1 UNPACK and VU1 worker overhead, native VU1 XGKICK/dispatch, pooled DMA buffers). Its GS draw-batching
+commits (00bda7f 09ea6cb 91ac954 c558c21) are left out: on an AMD RX 580 they overloaded the GPU (window 0.2-2 Hz).
+Measured on the Aegean ship (Xeon E5-2666 v3, RX 580, 2x): 42-45 -> 59-60 fps.
+
+diff --git a/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h b/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+index 4027621..ddfdd6f 100644
+--- a/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h
++++ b/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+@@ -30,6 +30,8 @@ namespace ps2x::iop
+         // runEeCycles split in two so the caller can time only the real IOP work: accrue returns true when a batch
+         // is due, then runPendingEeCycles runs it (same result as runEeCycles).
+         [[nodiscard]] bool accrueEeCycles(uint64_t eeCycles) noexcept;
++        // EE cycles that can still accrue before accrueEeCycles reports a batch (0: the next call does).
++        [[nodiscard]] uint64_t eeCyclesUntilBatch() const noexcept;
+         void runPendingEeCycles() noexcept;
+ 
+         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
+index ac8e640..3316d40 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -1137,6 +1137,14 @@ namespace ps2x::iop::detail
+         return m_impl->pendingIopCycles >= kIopCycleBatch;
+     }
+ 
++    uint64_t IopEmulator::eeCyclesUntilBatch() const noexcept
++    {
++        // accrue reports a batch once carry + eeCycles >= 8 * (kIopCycleBatch - pending)
++        if (m_impl->pendingIopCycles >= kIopCycleBatch)
++            return 0u;
++        return 8u * (kIopCycleBatch - m_impl->pendingIopCycles) - m_impl->eeCycleCarry;
++    }
++
+     void IopEmulator::runPendingEeCycles() noexcept
+     {
+         const uint64_t cycles = m_impl->pendingIopCycles;
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h
+index eab568e..1416ce7 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h
+@@ -26,6 +26,7 @@ namespace ps2x::iop::detail
+         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result);
+         void runEeCycles(uint64_t eeCycles) noexcept;
+         [[nodiscard]] bool accrueEeCycles(uint64_t eeCycles) noexcept;
++        [[nodiscard]] uint64_t eeCyclesUntilBatch() const noexcept;
+         void runPendingEeCycles() noexcept;
+         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
+         [[nodiscard]] bool hasRpcServer(uint32_t sid) const noexcept;
+diff --git a/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp b/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp
+index 5d08f69..cd27e27 100644
+--- a/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp
++++ b/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp
+@@ -176,6 +176,11 @@ namespace ps2x::iop
+         return m_impl->emulator.accrueEeCycles(eeCycles);
+     }
+ 
++    uint64_t IopSubsystem::eeCyclesUntilBatch() const noexcept
++    {
++        return m_impl->emulator.eeCyclesUntilBatch();
++    }
++
+     void IopSubsystem::runPendingEeCycles() noexcept
+     {
+         m_impl->emulator.runPendingEeCycles();
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+index 58e57de..4190a72 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+@@ -25,6 +25,8 @@
+ 
+ #include "ps2_log.h"
+ #include "runtime/ps2_address.h"
++#include "runtime/ee_checkpoint_clock.h"
++#include "runtime/ps2_inline.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/ps2_memory.h"
+ #include "runtime/gs/gs_frontend.h"
+@@ -400,7 +402,11 @@ public:
+     EeScheduler &eeScheduler();
+     const EeScheduler &eeScheduler() const;
+     void postEeEvent(EeEvent event);
+-    bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
++    // GOW-Port: the generated code's checkpoint: the quiet-cycle fast path inline, the full checkpoint out of line.
++    bool eeCheckpointDue(uint32_t cycles = 32u) noexcept
++    {
++        return !m_eeClock.advanceQuiet(cycles) && eeCheckpointDueFull(cycles);
++    }
+     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
+ 
+     struct EeExitHandlerRegistration
+@@ -433,9 +439,10 @@ public:
+                                  uint32_t tadr,
+                                  uint32_t chcr);
+ 
+-    static inline bool isSpecialAddress(uint32_t addr)
++    static PS2_FORCEINLINE bool isSpecialAddress(uint32_t addr)
+     {
+-        return Ps2IsSpecialAddress(addr);
++        // main RAM (almost every access) inline, the rest of the check out of line
++        return addr >= PS2_RAM_SIZE && Ps2IsSpecialAddress(addr);
+     }
+ 
+ public:
+@@ -489,6 +496,7 @@ private:
+     [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
+     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
+     void advanceIopEeCycles(uint64_t eeCycles) noexcept;
++    [[nodiscard]] uint64_t iopEeCyclesUntilBatch() const noexcept;
+     void resetIop();
+     void shutdownHostGraphics(); // GOW-Port: destruir GS antes de cerrar el contexto raylib.
+ 
+@@ -557,6 +565,8 @@ private:
+     uint8_t *m_boundGSVram = nullptr;
+     // Incremented on the EE executor when generated code yields at a checkpoint.
+     uint64_t m_eeCheckpointSerial = 0u;
++    EeCheckpointClock m_eeClock; // driven by m_eeScheduler (EeScheduler::m_clock)
++    bool eeCheckpointDueFull(uint32_t cycles) noexcept;
+ };
+ 
+ // Generated by ps2xRecomp in ps2xRuntime/src/runner/register_functions.cpp.
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+index c95d343..7b63598 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -13,8 +13,9 @@
+ #endif
+ 
+ #include "ps2_runtime.h"
++#include "runtime/ps2_inline.h"
+ 
+-static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
++static PS2_FORCEINLINE int32_t Ps2ExtractEpi32(__m128i v, int index)
+ {
+     switch (index & 3)
+     {
+@@ -29,7 +30,7 @@ static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
+     }
+ }
+ 
+-static inline int64_t Ps2ExtractEpi64(__m128i v, int index)
++static PS2_FORCEINLINE int64_t Ps2ExtractEpi64(__m128i v, int index)
+ {
+     if ((index & 1) == 0)
+     {
+@@ -46,12 +47,12 @@ static inline uint32_t ps2_clz32(uint32_t x)
+     return static_cast<uint32_t>(std::countl_zero(x));
+ }
+ 
+-static inline uint64_t Ps2HiLoToU64(uint64_t hi, uint64_t lo)
++static PS2_FORCEINLINE uint64_t Ps2HiLoToU64(uint64_t hi, uint64_t lo)
+ {
+     return ((hi & 0xFFFFFFFFull) << 32) | (lo & 0xFFFFFFFFull);
+ }
+ 
+-static inline uint64_t Ps2SignExt32ToU64(uint32_t v)
++static PS2_FORCEINLINE uint64_t Ps2SignExt32ToU64(uint32_t v)
+ {
+     return (uint64_t)(int64_t)(int32_t)v;
+ }
+@@ -143,7 +144,7 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
+ // GOW-Port: semantica de la FPU (COP1) y de VU0 en modo macro del PS2: no hay NaN ni infinitos (se satura al maximo
+ // finito), suma/resta sin bits de guarda, division y raices con flags de FCR31 y comparaciones sobre el patron de bits.
+ // Tomado del port de Shadow of the Colossus (TaylorNAlbarnaz/PS2Recomp, rama sotc-port: 8b51cb9, 9bb389e, c419f26).
+-inline __m128 ps2VuClampVector(__m128 value)
++PS2_FORCEINLINE __m128 ps2VuClampVector(__m128 value)
+ {
+     const __m128i bits = _mm_castps_si128(value);
+     const __m128i exponentMask = _mm_set1_epi32(0x7F800000);
+@@ -152,7 +153,7 @@ inline __m128 ps2VuClampVector(__m128 value)
+     return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(special, saturated), _mm_andnot_si128(special, bits)));
+ }
+ 
+-inline float ps2FpuClamp(float value)
++PS2_FORCEINLINE float ps2FpuClamp(float value)
+ {
+     uint32_t bits;
+     std::memcpy(&bits, &value, sizeof(bits));
+@@ -164,7 +165,7 @@ inline float ps2FpuClamp(float value)
+     return value;
+ }
+ 
+-inline void ps2FpuAlignOperands(float &a, float &b)
++PS2_FORCEINLINE void ps2FpuAlignOperands(float &a, float &b)
+ {
+     uint32_t ua;
+     uint32_t ub;
+@@ -183,19 +184,19 @@ inline void ps2FpuAlignOperands(float &a, float &b)
+     std::memcpy(&b, &ub, sizeof(b));
+ }
+ 
+-inline float ps2FpuAdd(float a, float b)
++PS2_FORCEINLINE float ps2FpuAdd(float a, float b)
+ {
+     ps2FpuAlignOperands(a, b);
+     return ps2FpuClamp(a + b);
+ }
+ 
+-inline float ps2FpuSub(float a, float b)
++PS2_FORCEINLINE float ps2FpuSub(float a, float b)
+ {
+     ps2FpuAlignOperands(a, b);
+     return ps2FpuClamp(a - b);
+ }
+ 
+-inline float ps2SignedFloatMax(uint32_t signSource)
++PS2_FORCEINLINE float ps2SignedFloatMax(uint32_t signSource)
+ {
+     const uint32_t bits = (signSource & 0x80000000u) | 0x7F7FFFFFu;
+     float out;
+@@ -203,14 +204,14 @@ inline float ps2SignedFloatMax(uint32_t signSource)
+     return out;
+ }
+ 
+-inline uint32_t ps2FloatBits(float value)
++PS2_FORCEINLINE uint32_t ps2FloatBits(float value)
+ {
+     uint32_t bits;
+     std::memcpy(&bits, &value, sizeof(bits));
+     return bits;
+ }
+ 
+-inline uint32_t ps2FpuCompareKey(float value)
++PS2_FORCEINLINE uint32_t ps2FpuCompareKey(float value)
+ {
+     uint32_t bits = ps2FloatBits(value);
+     if ((bits & 0x7F800000u) == 0u)
+@@ -218,7 +219,7 @@ inline uint32_t ps2FpuCompareKey(float value)
+     return (bits & 0x80000000u) != 0u ? ~bits : bits ^ 0x80000000u;
+ }
+ 
+-inline bool ps2FloatIsZero(float value)
++PS2_FORCEINLINE bool ps2FloatIsZero(float value)
+ {
+     return (ps2FloatBits(value) & 0x7F800000u) == 0u;
+ }
+@@ -341,161 +342,122 @@ inline float ps2VuRsqrt(uint16_t &status, float numerator, float value)
+ // Fast path: Direct RDRAM access (masked).
+ // Slow path: Full runtime->Load/Store
+ 
+-static inline bool Ps2FastRangeIsContiguous(uint32_t offset, uint32_t bytes)
++static PS2_FORCEINLINE bool Ps2FastRangeIsContiguous(uint32_t offset, uint32_t bytes)
+ {
+     return offset <= (PS2_RAM_SIZE - bytes);
+ }
+ 
+-static inline uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
++// An access that runs past the end of RAM wraps to its start (never for an aligned access).
++template <typename T>
++static PS2_NOINLINE T Ps2FastReadWrapped(const uint8_t *rdram, uint32_t offset)
++{
++    uint8_t wrapped[sizeof(T)];
++    for (uint32_t i = 0; i < sizeof(T); ++i)
++        wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
++    T value;
++    std::memcpy(&value, wrapped, sizeof(value));
++    return value;
++}
++
++template <typename T>
++static PS2_NOINLINE void Ps2FastWriteWrapped(uint8_t *rdram, uint32_t offset, T value)
++{
++    uint8_t wrapped[sizeof(T)];
++    std::memcpy(wrapped, &value, sizeof(value));
++    for (uint32_t i = 0; i < sizeof(T); ++i)
++        rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
++}
++
++static PS2_FORCEINLINE uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
+ {
+     return rdram[addr & PS2_RAM_MASK];
+ }
+ 
+-static inline uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
++static PS2_FORCEINLINE uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
+-    {
+-        uint8_t wrapped[sizeof(uint16_t)];
+-        for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
+-        {
+-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+-        }
+-        uint16_t value;
+-        std::memcpy(&value, wrapped, sizeof(value));
+-        return value;
+-    }
+-
++        return Ps2FastReadWrapped<uint16_t>(rdram, offset);
+     uint16_t value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+     return value;
+ }
+ 
+-static inline uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
++static PS2_FORCEINLINE uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
+-    {
+-        uint8_t wrapped[sizeof(uint32_t)];
+-        for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
+-        {
+-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+-        }
+-        uint32_t value;
+-        std::memcpy(&value, wrapped, sizeof(value));
+-        return value;
+-    }
+-
++        return Ps2FastReadWrapped<uint32_t>(rdram, offset);
+     uint32_t value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+     return value;
+ }
+ 
+-static inline uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
++static PS2_FORCEINLINE uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
+-    {
+-        uint8_t wrapped[sizeof(uint64_t)];
+-        for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
+-        {
+-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+-        }
+-        uint64_t value;
+-        std::memcpy(&value, wrapped, sizeof(value));
+-        return value;
+-    }
+-
++        return Ps2FastReadWrapped<uint64_t>(rdram, offset);
+     uint64_t value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+     return value;
+ }
+ 
+-static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
++static PS2_FORCEINLINE __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
+ {
+     // GOW-Port: LQ/SQ/LQC2/SQC2 ignoran los 4 bits bajos de la direccion (fork de SotC, 9bb389e).
+     const uint32_t offset = addr & PS2_RAM_MASK & ~0xFu;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
+-    {
+-        alignas(16) uint8_t wrapped[sizeof(__m128i)];
+-        for (uint32_t i = 0; i < sizeof(__m128i); ++i)
+-        {
+-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+-        }
+-        __m128i value;
+-        std::memcpy(&value, wrapped, sizeof(value));
+-        return value;
+-    }
+-
++        return Ps2FastReadWrapped<__m128i>(rdram, offset);
+     __m128i value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+     return value;
+ }
+ 
+-static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
++static PS2_FORCEINLINE void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
+ {
+     rdram[addr & PS2_RAM_MASK] = value;
+ }
+ 
+-static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
++static PS2_FORCEINLINE void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
+     {
+-        uint8_t wrapped[sizeof(uint16_t)];
+-        std::memcpy(wrapped, &value, sizeof(value));
+-        for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
+-        {
+-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+-        }
++        Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+     }
+     std::memcpy(rdram + offset, &value, sizeof(value));
+ }
+ 
+-static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
++static PS2_FORCEINLINE void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
+     {
+-        uint8_t wrapped[sizeof(uint32_t)];
+-        std::memcpy(wrapped, &value, sizeof(value));
+-        for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
+-        {
+-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+-        }
++        Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+     }
+     std::memcpy(rdram + offset, &value, sizeof(value));
+ }
+ 
+-static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
++static PS2_FORCEINLINE void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
+     {
+-        uint8_t wrapped[sizeof(uint64_t)];
+-        std::memcpy(wrapped, &value, sizeof(value));
+-        for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
+-        {
+-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+-        }
++        Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+     }
+     std::memcpy(rdram + offset, &value, sizeof(value));
+ }
+ 
+-static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
++static PS2_FORCEINLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK & ~0xFu; // GOW-Port
+     if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
+     {
+-        alignas(16) uint8_t wrapped[sizeof(__m128i)];
+-        std::memcpy(wrapped, &value, sizeof(value));
+-        for (uint32_t i = 0; i < sizeof(__m128i); ++i)
+-        {
+-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+-        }
++        Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+     }
+     std::memcpy(rdram + offset, &value, sizeof(value));
+@@ -1016,7 +978,7 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
+ #define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx]))
+ #define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
+ 
+-static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
++static PS2_FORCEINLINE void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
+ {
+     if (reg != 0)
+     {
+@@ -1027,7 +989,7 @@ static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
+ // Writes the low 64 bits of a GPR with one scalar store; the upper 64 bits stay untouched in memory.
+ // Same result as Ps2SetGprLow64 without the 128-bit load/merge/store (and without NEON lane inserts on ARM).
+ // Little-endian hosts only (x86-64, AArch64), like the rest of the runtime.
+-static inline void Ps2SetGprLow64Bits(R5900Context *ctx, int reg, uint64_t new_low)
++static PS2_FORCEINLINE void Ps2SetGprLow64Bits(R5900Context *ctx, int reg, uint64_t new_low)
+ {
+     if (reg != 0)
+     {
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ee_checkpoint_clock.h b/PS2Recomp/ps2xRuntime/include/runtime/ee_checkpoint_clock.h
+new file mode 100644
+index 0000000..1060e46
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ee_checkpoint_clock.h
+@@ -0,0 +1,38 @@
++#ifndef PS2_EE_CHECKPOINT_CLOCK_H
++#define PS2_EE_CHECKPOINT_CLOCK_H
++
++#include <atomic>
++#include <cstdint>
++
++// GOW-Port: the EE guest clock and the state of the generated code's checkpoint fast path. EeScheduler drives it
++// (full checkpoints, events, timers); PS2Runtime owns it so the generated code reaches advanceQuiet inline through
++// PS2Runtime::eeCheckpointDue, without a call (tens of millions of checkpoints per second).
++// Everything is EE-thread state except the two flags, which other threads set to force a full checkpoint.
++struct alignas(64) EeCheckpointClock
++{
++    uint64_t eeCycle = 0;        // EE cycles since reset
++    // Cycles that can pass before anything is due (the distance to the next EE timer step, IOP batch, scheduled
++    // event or slice end, computed by the last full checkpoint); 0 = the next checkpoint is a full one.
++    uint64_t quietCycles = 0;
++    // Cycles already in eeCycle but not yet handed to the EE timers and the IOP (EeScheduler::syncDeferredCycles).
++    uint64_t deferredCycles = 0;
++    std::atomic<bool> checkpointPending{false}; // an event, interrupt or reschedule is waiting
++    std::atomic<bool> limitsChanged{true};      // a limit of quietCycles moved: recompute it
++
++    // While the cycles stay below quietCycles and no other thread asked for a checkpoint, the full checkpoint would
++    // only add cycles and return false: advance the clock here and defer the timer and IOP cycles. Returns false
++    // when the full checkpoint has to run (EeScheduler::checkpointDue); same results at the same checkpoints.
++    [[nodiscard]] bool advanceQuiet(uint32_t cycles) noexcept
++    {
++        const uint64_t elapsed = cycles != 0u ? cycles : 1u;
++        if (elapsed >= quietCycles || checkpointPending.load(std::memory_order_relaxed) ||
++            limitsChanged.load(std::memory_order_relaxed))
++            return false;
++        quietCycles -= elapsed;
++        eeCycle += elapsed;
++        deferredCycles += elapsed;
++        return true;
++    }
++};
++
++#endif // PS2_EE_CHECKPOINT_CLOCK_H
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h b/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h
+index 417013f..9d94d8a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -279,11 +279,20 @@ public:
+     void requestStop();
+     void postEvent(EeEvent event);
+     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
++    // The generated code reaches this through PS2Runtime::eeCheckpointDue after EeCheckpointClock::advanceQuiet
++    // (the fast path that defers the timer and IOP cycles while nothing can be due).
++    // Hands the deferred cycles to the EE timers and the IOP (below their next step by construction); limitsChanged
++    // also makes the next checkpoint a full one (an EE timer write can bring its next event closer).
++    void syncDeferredCycles(bool limitsChanged) noexcept;
+     void accountCycles(uint32_t cycles) noexcept;
+     // GOW-Port: for a guest busy-wait that never blocks (the movie player): when guest time has fallen behind the
+     // host clock (a scheduled event's host deadline has passed but its guest cycle is not reached), account the
+     // missing cycles (at most maxCycles) so guest time, EE timers and the IOP keep real time. Returns cycles added.
+     uint64_t catchUpToHost(uint64_t maxCycles) noexcept;
++    // GOW-Port: for guest countdown loops run natively (gow_overrides vid wait loops): takes up to maxCount
++    // checkpoints of `cycles` each at once, as many as EeCheckpointClock::advanceQuiet would let through one by one
++    // (all below quietCycles, no flag set). Same clock, timer and IOP state as that many fast-path checkpoints.
++    uint64_t advanceQuietRepeated(uint32_t cycles, uint64_t maxCount) noexcept;
+     [[nodiscard]] bool isExecutingGuest() const noexcept;
+ 
+     // Kernel object API. All calls except postEvent/requestStop execute on the
+@@ -437,13 +446,12 @@ private:
+     bool m_timeSliceExpired = false;
+     bool m_insideInterrupt = false;
+     uint32_t m_pendingEeTimerInterrupts = 0;
+-    uint64_t m_eeCycle = 0;
++    EeCheckpointClock &m_clock; // PS2Runtime::m_eeClock: guest cycle, checkpoint fast path and its flags
+     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
+     std::thread::id m_executorThread{};
+     std::atomic<bool> m_running{false};
+     std::atomic<bool> m_guestExecuting{false};
+     std::atomic<bool> m_stopRequested{false};
+-    std::atomic<bool> m_checkpointPending{false};
+     uint32_t m_debugPublishCountdown = 0u;
+ 
+     mutable std::mutex m_eventMutex;
+@@ -461,6 +469,8 @@ private:
+     uint32_t m_gsVSyncCallbackSp = 0;
+     std::unordered_map<uint64_t, uint32_t> m_invocationStackTops;
+     std::atomic<uint64_t> m_nextDeadlineCycle{0};
++    bool checkpointDueFull(uint32_t cycles) noexcept;
++    uint64_t quietCycles() const noexcept;
+ 
+     mutable std::mutex m_snapshotMutex;
+     EeKernelSnapshot m_snapshot;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+index c89cb8b..b26ab91 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+@@ -36,6 +36,9 @@ public:
+     void reset() { m_queue.clear(); m_path3Input = {}; }
+ 
+     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
++    // submit + drain. With nothing queued the packet is the whole batch: it goes to the callback in place, without the
++    // queue's copy (every XGKICK takes this path).
++    void submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+ 
+     void drain();
+     bool empty() const { return m_queue.empty(); }
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_inline.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_inline.h
+new file mode 100644
+index 0000000..c5ad5ad
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_inline.h
+@@ -0,0 +1,15 @@
++#ifndef PS2_INLINE_H
++#define PS2_INLINE_H
++
++// GOW-Port: the small helpers the generated code calls on every guest instruction (memory access, lane extracts,
++// GPR writes, FPU/VU float rules) must be inlined; MSVC stops inlining inside the large generated functions and
++// left them as calls (several % of the EE thread). Their rare slow paths are PS2_NOINLINE so the inlined part stays small.
++#if defined(_MSC_VER)
++#define PS2_FORCEINLINE __forceinline
++#define PS2_NOINLINE __declspec(noinline)
++#else
++#define PS2_FORCEINLINE inline __attribute__((always_inline))
++#define PS2_NOINLINE __attribute__((noinline))
++#endif
++
++#endif // PS2_INLINE_H
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+index 7aa72b9..e9539e1 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -313,6 +313,18 @@ public:
+     // EE timers advance from the scheduler's emulated EE-cycle clock. The
+     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
++    // EE cycles advanceEeTimers can still take without stepping the timers (0: the next call steps them).
++    uint64_t eeTimerQuietCycles() const noexcept
++    {
++        return m_eeTimerPendingCycles < m_eeTimerBudget ? m_eeTimerBudget - m_eeTimerPendingCycles : 0u;
++    }
++    // Called before every EE timer register access (EeScheduler::syncDeferredCycles): the scheduler's checkpoint
++    // fast path defers the timer cycles; limitsChanged = a write that can move the next timer event.
++    void setEeCycleSync(void (*sync)(void *, bool), void *context) noexcept
++    {
++        m_eeCycleSync = sync;
++        m_eeCycleSyncContext = context;
++    }
+     // GOW-Port: native EE clock. A timer without compare/overflow events (no CMPE/OVFE/ZRET, e.g. the game's
+     // T0 = BUSCLK/256 and T1 = H-BLNK counters) is not stepped: its count is computed when read, from the guest
+     // EE cycle count since its epoch (the last COUNT write or clock change). Timers with events keep the stepping
+@@ -364,6 +376,8 @@ public:
+     void flushMaskedPath3Packets(bool drainImmediately = true);
+ 
+     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
++    // PS2X_GS_WORKER_TRACE=<s>: one "[gsw-trace] <host us> <what> <value>" line (kick/job-start/job-done/gs-irq)
++    static void gsWorkerTrace(const char *what, size_t value);
+     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     void processVIF0Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+@@ -527,6 +541,8 @@ public:
+     // counts and interrupts as with per-call advancing (the tick math carries its remainder exactly).
+     uint64_t m_eeTimerPendingCycles = 0;
+     uint64_t m_eeTimerBudget = 0;
++    void (*m_eeCycleSync)(void *, bool) = nullptr;
++    void *m_eeCycleSyncContext = nullptr;
+     uint64_t m_eeCycleTotal = 0; // guest EE cycles seen by advanceEeTimers (the scheduler's EE cycle count)
+     uint32_t eeTimerCount(const EeTimer &timer) const noexcept;
+     uint32_t stepEeTimers(uint64_t eeCycles) noexcept;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h
+index ee9d3f1..e0084f7 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -395,7 +395,8 @@ private:
+     void advanceTo(uint64_t targetCycle);
+     void flushPipelines();
+     void progressXgkick();
+-    void finishXgkick();
++    // packet: the whole PATH1 packet (nullptr: m_xgkick.packet); the native XGKICK passes it in VU memory when it does not wrap
++    void finishXgkick(const uint8_t *packet = nullptr);
+     uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
+     void markPairWrites(const DecodedInstructionPair &decoded);
+     bool stepPair(const DecodedInstructionPair &decoded, StepContext &context);
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 14823e2..237d090 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -100,6 +100,10 @@ void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1Ta
+ struct VU1Interpreter::NativeState
+ {
+     uint64_t generation = ~0ull;
++    // The micro memory the slots were set up from: when the code generation changes, only slots whose extent (block
++    // pairs plus the pair after it, which ends the extent scan) overlaps a changed pair are set up again.
++    uint8_t code[16384];
++    bool codeValid = false;
+     // Exact issue cycles of a block from the pipeline state at its entry, so results and flags in flight from the previous
+     // block (native or exact) stall and become visible exactly as in the exact engine. Pipeline lanes: VF reg*4+comp
+     // (0-127), VI 128+reg, ACC 144+comp. While native blocks run, no per-lane state is kept: the recent blocks are
+@@ -123,26 +127,29 @@ struct VU1Interpreter::NativeState
+         uint32_t next = 0;
+     };
+     std::unordered_map<uint64_t, BlockTiming> timings;
+-    // Per pc slot, what the dispatch loop touches for every block (one cache line).
++    // Per pc slot. The first cache line holds what the dispatch loop touches for every block; the entry-timing memo
++    // (only blocks that read entry flags use it) is in the second.
+     struct alignas(64) Slot
+     {
+         VU1NativeFn fn = nullptr; // null: no native block at this pc
+         const uint8_t *idle = nullptr;
+         BlockTiming *bt = nullptr;
+-        // Entry timing by predecessor (blocks that read entry flags): when the block before ran for maxLat cycles or more
+-        // and nothing from the exact engine is still in flight, that block and its timing table alone decide the entry
+-        // state; the timing found for it is reused.
+-        const BlockTiming *memoPred = nullptr;
+-        const uint8_t *memoCyc = nullptr;
+-        uint32_t memoPredId = 0, memoId = 0;
++        const VU1TailDesc *tail = nullptr;
+         uint16_t pairs = 0;
++        uint16_t idleEnd = 0; // idle[pairs - 1] + 1: the block's length in cycles with an idle pipeline
+         bool known = false;
+         bool readsEntryFlags = false;
+         bool memoable = false;   // its entry timing does not depend on FDIV/EFU state
+-        const VU1TailDesc *tail = nullptr;
+         uint8_t scalarCount = 0; // FDIV / EFU operations it starts (kScalarMany: more than fit in `scalar`)
+         struct Scalar { uint8_t pair, latency; bool fdiv; } scalar[2] = {};
++        // Entry timing by predecessor (blocks that read entry flags): when the block before ran for maxLat cycles or more
++        // and nothing from the exact engine is still in flight, that block and its timing table alone decide the entry
++        // state; the timing found for it is reused.
++        alignas(64) const BlockTiming *memoPred = nullptr;
++        const uint8_t *memoCyc = nullptr;
++        uint32_t memoPredId = 0, memoId = 0;
+     };
++    static_assert(sizeof(Slot) == 128);
+     static constexpr uint8_t kScalarMany = 0xFF;
+     Slot slots[2048];
+     // Native blocks run since native entry (or the last sync), newest last; histCount counts them all (the ring keeps the
+@@ -165,7 +172,7 @@ struct VU1Interpreter::NativeState
+     bool enabled = std::getenv("GOW_VU1_NATIVE_OFF") == nullptr;
+     unsigned verifyLeft = std::getenv("GOW_VU1N_VERIFY") ? static_cast<unsigned>(std::atoi(std::getenv("GOW_VU1N_VERIFY"))) : 0u;
+     bool diag = std::getenv("GOW_VU1N_DIAG") != nullptr;
+-    unsigned long long nativePairs = 0, missBlocks = 0, nativeRuns = 0;
++    unsigned long long nativePairs = 0, nativeBlocks = 0, missBlocks = 0, nativeRuns = 0, codeChanges = 0, slotSetups = 0;
+     std::unordered_map<uint32_t, unsigned> missPcs, missHits;
+     unsigned limit = ~0u, count = 0; // verify bisection: native blocks allowed in this run
+     VU1State snap;                   // state on entry of block number `limit` (verify bisection)
+@@ -196,7 +203,9 @@ struct VU1NativeAccess
+                                    uint32_t pc, uint32_t count, const uint8_t *idle);
+     static const uint8_t *blockTiming(VU1Interpreter &vu, VU1Interpreter::NativeState::Slot &sl, uint32_t &cycId);
+     static void scalarStart(VU1Interpreter &vu, uint64_t issue, uint32_t latency, bool fdiv);
++    static void commitDue(VU1Interpreter &vu); // commitReadyPipelines after a native block (FDIV/EFU-only fast path)
+     static VU1Interpreter::NativeState::Slot &slotFor(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint32_t pc);
++    static void codeChanged(VU1Interpreter::NativeState &ns, const uint8_t *code); // micro memory (16 KB) rewritten
+     static uint64_t &laneWord(VU1Interpreter &vu, uint32_t lane);
+     template <typename F>
+     static void walkHistory(VU1Interpreter::NativeState &ns, uint64_t now, uint64_t want[3], F &&ready);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 955db77..491e901 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -77,7 +77,7 @@ namespace
+ }
+ 
+ EeScheduler::EeScheduler(PS2Runtime &runtime)
+-    : m_runtime(runtime)
++    : m_runtime(runtime), m_clock(runtime.m_eeClock)
+ {
+ }
+ 
+@@ -116,10 +116,13 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     m_timeSliceExpired = false;
+     m_insideInterrupt = false;
+     m_pendingEeTimerInterrupts = 0u;
+-    m_eeCycle = 0u;
++    m_clock.eeCycle = 0u;
+     m_sliceEndCycle = kDefaultTimeSliceCycles;
++    m_clock.quietCycles = 0u;
++    m_clock.deferredCycles = 0u;
++    m_clock.limitsChanged.store(true, std::memory_order_seq_cst);
+     m_stopRequested.store(false, std::memory_order_release);
+-    m_checkpointPending.store(false, std::memory_order_release);
++    m_clock.checkpointPending.store(false, std::memory_order_release);
+     m_debugPublishCountdown = 0u;
+     {
+         std::lock_guard lock(m_eventMutex);
+@@ -151,7 +154,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     main.status = EeThreadStatus::Ready;
+     m_threads.emplace(main.id, std::move(main));
+     m_readyQueues[0].push_back(kMainThreadId);
+-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
++    scheduleEvent(m_clock.eeCycle + kVBlankPeriodCycles,
+                   std::chrono::steady_clock::now() + kVBlankPeriod,
+                   EeEvent{EeEventType::VBlankStart, 0, 0});
+     publishSnapshot();
+@@ -344,7 +347,7 @@ void EeScheduler::run()
+ void EeScheduler::requestStop()
+ {
+     m_stopRequested.store(true, std::memory_order_release);
+-    m_checkpointPending.store(true, std::memory_order_release);
++    m_clock.checkpointPending.store(true, std::memory_order_release);
+     m_eventCv.notify_all();
+ }
+ 
+@@ -359,29 +362,66 @@ void EeScheduler::postEvent(EeEvent event)
+     {
+         std::lock_guard lock(m_eventMutex);
+         m_events.push_back(event);
+-        m_checkpointPending.store(true, std::memory_order_release);
++        m_clock.checkpointPending.store(true, std::memory_order_release);
+     }
+     m_eventCv.notify_one();
+ }
+ 
+ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
++{
++    // seq_cst: a limit moved by another thread before this exchange is visible to quietCycles() below; one moved
++    // after it leaves the flag set, so the next checkpoint is a full one again.
++    m_clock.limitsChanged.exchange(false, std::memory_order_seq_cst);
++    const bool due = checkpointDueFull(cycles);
++    m_clock.quietCycles = due ? 0u : quietCycles();
++    return due;
++}
++
++uint64_t EeScheduler::quietCycles() const noexcept
++{
++    if (m_pendingEeTimerInterrupts != 0u || m_clock.eeCycle >= m_sliceEndCycle)
++        return 0u;
++    uint64_t quiet = m_sliceEndCycle - m_clock.eeCycle;
++    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
++    if (nextEventCycle != 0u)
++        quiet = nextEventCycle > m_clock.eeCycle ? std::min(quiet, nextEventCycle - m_clock.eeCycle) : 0u;
++    quiet = std::min(quiet, m_runtime.memory().eeTimerQuietCycles());
++    return std::min(quiet, m_runtime.iopEeCyclesUntilBatch());
++}
++
++void EeScheduler::syncDeferredCycles(bool limitsChanged) noexcept
++{
++    if (m_clock.deferredCycles != 0u)
++    {
++        const uint64_t deferred = m_clock.deferredCycles;
++        m_clock.deferredCycles = 0u;
++        m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(deferred);
++        m_runtime.advanceIopEeCycles(deferred);
++        if (m_pendingEeTimerInterrupts != 0u)
++            m_clock.checkpointPending.store(true, std::memory_order_release);
++    }
++    if (limitsChanged)
++        m_clock.quietCycles = 0u;
++}
++
++bool EeScheduler::checkpointDueFull(uint32_t cycles) noexcept
+ {
+     accountCycles(cycles);
+ 
+-    if (m_checkpointPending.load(std::memory_order_acquire) ||
++    if (m_clock.checkpointPending.load(std::memory_order_acquire) ||
+         m_stopRequested.load(std::memory_order_acquire))
+     {
+         return true;
+     }
+ 
+     const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+-    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
++    if (nextEventCycle != 0u && m_clock.eeCycle >= nextEventCycle)
+     {
+-        m_checkpointPending.store(true, std::memory_order_release);
++        m_clock.checkpointPending.store(true, std::memory_order_release);
+         return true;
+     }
+ 
+-    if (m_eeCycle < m_sliceEndCycle)
++    if (m_clock.eeCycle < m_sliceEndCycle)
+     {
+         return false;
+     }
+@@ -401,12 +441,16 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+ void EeScheduler::accountCycles(uint32_t cycles) noexcept
+ {
+     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+-    m_eeCycle += elapsed;
+-    m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+-    m_runtime.advanceIopEeCycles(elapsed);
++    m_clock.eeCycle += elapsed;
++    // cycles deferred by EeCheckpointClock::advanceQuiet are already in m_clock.eeCycle
++    const uint64_t accrued = elapsed + m_clock.deferredCycles;
++    m_clock.deferredCycles = 0u;
++    m_clock.quietCycles = 0u; // recomputed by the next full checkpoint
++    m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(accrued);
++    m_runtime.advanceIopEeCycles(accrued);
+     if (m_pendingEeTimerInterrupts != 0u)
+     {
+-        m_checkpointPending.store(true, std::memory_order_release);
++        m_clock.checkpointPending.store(true, std::memory_order_release);
+     }
+ }
+ 
+@@ -418,13 +462,13 @@ uint64_t EeScheduler::catchUpToHost(uint64_t maxCycles) noexcept
+         const auto now = std::chrono::steady_clock::now();
+         for (const ScheduledEvent &item : m_deadlines)
+         {
+-            if (item.hostDeadline <= now && item.deadlineCycle > m_eeCycle && item.deadlineCycle > target)
++            if (item.hostDeadline <= now && item.deadlineCycle > m_clock.eeCycle && item.deadlineCycle > target)
+                 target = item.deadlineCycle; // the latest event that is already due on the host clock
+         }
+     }
+-    if (target <= m_eeCycle)
++    if (target <= m_clock.eeCycle)
+         return 0u;
+-    uint64_t missing = std::min(target - m_eeCycle, maxCycles);
++    uint64_t missing = std::min(target - m_clock.eeCycle, maxCycles);
+     const uint64_t added = missing;
+     while (missing != 0u)
+     {
+@@ -432,10 +476,25 @@ uint64_t EeScheduler::catchUpToHost(uint64_t maxCycles) noexcept
+         accountCycles(step);
+         missing -= step;
+     }
+-    m_checkpointPending.store(true, std::memory_order_release);
++    m_clock.checkpointPending.store(true, std::memory_order_release);
+     return added;
+ }
+ 
++uint64_t EeScheduler::advanceQuietRepeated(uint32_t cycles, uint64_t maxCount) noexcept
++{
++    const uint64_t each = cycles != 0u ? cycles : 1u;
++    if (m_clock.quietCycles == 0u || m_clock.checkpointPending.load(std::memory_order_relaxed) ||
++        m_clock.limitsChanged.load(std::memory_order_relaxed))
++        return 0u;
++    // advanceQuiet passes a checkpoint while its cycles stay below the remaining quiet cycles
++    const uint64_t count = std::min(maxCount, (m_clock.quietCycles - 1u) / each);
++    const uint64_t total = count * each;
++    m_clock.quietCycles -= total;
++    m_clock.eeCycle += total;
++    m_clock.deferredCycles += total;
++    return count;
++}
++
+ bool EeScheduler::isExecutingGuest() const noexcept
+ {
+     return m_guestExecuting.load(std::memory_order_acquire);
+@@ -1111,7 +1170,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
+     }
+     m_alarms.emplace(id, EeAlarm{id, ticks, handler, argument, gp, sp});
+     const uint64_t tickCount = ticks == 0u ? 1u : static_cast<uint64_t>(ticks);
+-    scheduleEvent(m_eeCycle + tickCount * kAlarmTickCycles,
++    scheduleEvent(m_clock.eeCycle + tickCount * kAlarmTickCycles,
+                   std::chrono::steady_clock::now() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
+                   EeEvent{EeEventType::Alarm, static_cast<uint32_t>(id), 0});
+     return id;
+@@ -1123,9 +1182,9 @@ void EeScheduler::delayCurrent(uint64_t cycles)
+     // A wake-up event at the deadline, like the timer alarm the guest's DelayThread used. The token names this one
+     // wait (deadline + thread), so a stale event of an earlier, released delay cannot wake a later one.
+     constexpr uint32_t kDelayWaitType = 2u;
+-    const uint64_t deadline = m_eeCycle + std::max<uint64_t>(1u, cycles);
++    const uint64_t deadline = m_clock.eeCycle + std::max<uint64_t>(1u, cycles);
+     const uint64_t token = (deadline << 8) | static_cast<uint64_t>(m_currentThreadId & 0xFF);
+-    scheduleEvent(deadline, std::chrono::steady_clock::now() + eeCyclesToHostDuration(deadline - m_eeCycle),
++    scheduleEvent(deadline, std::chrono::steady_clock::now() + eeCyclesToHostDuration(deadline - m_clock.eeCycle),
+                   EeEvent{EeEventType::ExternalWake, kDelayWaitType, token});
+     waitExternal(EeWaitReason::External, kDelayWaitType, token);
+ }
+@@ -1152,7 +1211,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
+     assertExecutor();
+     invocation.sequence = ++m_invocationSequence;
+     m_pendingInvocations.push_back(std::move(invocation));
+-    m_checkpointPending.store(true, std::memory_order_release);
++    m_clock.checkpointPending.store(true, std::memory_order_release);
+ }
+ 
+ [[noreturn]] void EeScheduler::invokeCurrent(GuestInvocation invocation)
+@@ -1535,7 +1594,7 @@ void EeScheduler::publishSnapshot()
+ {
+     EeKernelSnapshot next{};
+     next.sequence = ++m_snapshotSequence;
+-    next.eeCycle = m_eeCycle;
++    next.eeCycle = m_clock.eeCycle;
+     next.sliceEndCycle = m_sliceEndCycle;
+     next.nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+     next.runningThreadId = m_currentThreadId;
+@@ -1767,7 +1826,7 @@ void EeScheduler::requestPreemptionIfHigher(const GuestThread &readyThread, bool
+     m_rescheduleRequested = true;
+     if (interruptSafe || m_insideInterrupt)
+     {
+-        m_checkpointPending.store(true, std::memory_order_release);
++        m_clock.checkpointPending.store(true, std::memory_order_release);
+     }
+ }
+ 
+@@ -1843,9 +1902,9 @@ void EeScheduler::processPendingEvents()
+     {
+         std::lock_guard lock(m_eventMutex);
+         const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+-        const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
++        const bool cycleEventDue = nextEventCycle != 0u && m_clock.eeCycle >= nextEventCycle;
+         const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
+-        m_checkpointPending.store(pendingWork, std::memory_order_release);
++        m_clock.checkpointPending.store(pendingWork, std::memory_order_release);
+     }
+     applyPendingPreemption();
+ }
+@@ -1861,7 +1920,7 @@ void EeScheduler::processDueDeadlines()
+             const auto now = std::chrono::steady_clock::now();
+             for (const ScheduledEvent &item : m_deadlines)
+             {
+-                if (item.deadlineCycle <= m_eeCycle &&
++                if (item.deadlineCycle <= m_clock.eeCycle &&
+                     (pacingDeadline == std::chrono::steady_clock::time_point{} ||
+                      item.hostDeadline < pacingDeadline))
+                 {
+@@ -1892,7 +1951,7 @@ void EeScheduler::processDueDeadlines()
+             const auto pacedNow = std::chrono::steady_clock::now();
+             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
+                                               [this, pacedNow](const ScheduledEvent &item)
+-                                              { return item.deadlineCycle <= m_eeCycle &&
++                                              { return item.deadlineCycle <= m_clock.eeCycle &&
+                                                        item.hostDeadline <= pacedNow; });
+             due.insert(due.end(),
+                        std::make_move_iterator(m_deadlines.begin()),
+@@ -2139,7 +2198,7 @@ void EeScheduler::waitForEvent()
+         const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
+         if (timerHostDeadline < hostDeadline)
+         {
+-            deadlineCycle = m_eeCycle + timerCycles;
++            deadlineCycle = m_clock.eeCycle + timerCycles;
+             hostDeadline = timerHostDeadline;
+         }
+     }
+@@ -2149,7 +2208,7 @@ void EeScheduler::waitForEvent()
+                                                         m_stopRequested.load(std::memory_order_acquire); });
+     if (!signaled)
+     {
+-        const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
++        const uint64_t elapsed = deadlineCycle > m_clock.eeCycle ? deadlineCycle - m_clock.eeCycle : 0u;
+         lock.unlock();
+         uint64_t remaining = elapsed;
+         while (remaining > 0u)
+@@ -2158,7 +2217,7 @@ void EeScheduler::waitForEvent()
+             accountCycles(step);
+             remaining -= step;
+         }
+-        m_checkpointPending.store(true, std::memory_order_release);
++        m_clock.checkpointPending.store(true, std::memory_order_release);
+     }
+ }
+ 
+@@ -2179,6 +2238,7 @@ void EeScheduler::updateNextDeadline()
+     if (m_deadlines.empty())
+     {
+         m_nextDeadlineCycle.store(0u, std::memory_order_release);
++        m_clock.limitsChanged.store(true, std::memory_order_seq_cst);
+         return;
+     }
+     const auto it = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+@@ -2191,6 +2251,7 @@ void EeScheduler::updateNextDeadline()
+                                          return left.sequence < right.sequence;
+                                      });
+     m_nextDeadlineCycle.store(it->deadlineCycle, std::memory_order_release);
++    m_clock.limitsChanged.store(true, std::memory_order_seq_cst);
+ }
+ 
+ bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
+@@ -2208,8 +2269,9 @@ bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
+ 
+ void EeScheduler::renewTimeSlice()
+ {
+-    m_sliceEndCycle = m_eeCycle + kDefaultTimeSliceCycles;
++    m_sliceEndCycle = m_clock.eeCycle + kDefaultTimeSliceCycles;
+     m_timeSliceExpired = false;
++    m_clock.limitsChanged.store(true, std::memory_order_seq_cst);
+ }
+ 
+ void EeScheduler::copyMainContextToRuntime()
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+index 786cb51..1fc0d9f 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+@@ -2,7 +2,6 @@
+ 
+ #include <condition_variable>
+ #include <cstdio>
+-#include <deque>
+ #include <mutex>
+ #include <thread>
+ #include <vector>
+@@ -25,7 +24,7 @@ namespace
+         std::condition_variable work;   // stage waits for packets
+         std::condition_variable space;  // producer waits for room
+         std::condition_variable idle;   // waitIdle
+-        std::deque<Packet> queue;
++        std::vector<Packet> queue; // a vector keeps its capacity across swaps (MSVC deque allocates per Packet)
+         std::vector<std::vector<uint8_t>> spare; // recycled buffers (avoid an allocation per packet)
+         size_t queuedBytes = 0;
+         bool busy = false;
+@@ -45,7 +44,7 @@ namespace
+     void loop()
+     {
+         Stage &s = stage();
+-        std::deque<Packet> batch;
++        std::vector<Packet> batch;
+         for (;;)
+         {
+             {
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index 63a05c1..592a4f6 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -77,6 +77,20 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
+     m_queue.push_back(std::move(pkt));
+ }
+ 
++void GifArbiter::submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
++{
++    if (!m_queue.empty() || !data || sizeBytes < 16 || !m_processFn || pathId < GifPathId::Path1 || pathId > GifPathId::Path3)
++    {
++        submit(pathId, data, sizeBytes, path2DirectHl);
++        drain();
++        return;
++    }
++    if (pathId == GifPathId::Path3)
++        trackPath3Packet(data, sizeBytes); // the PATH3 tag cursor follows every packet
++    m_processFn(pathId, data, sizeBytes);
++    drain(); // packets the callback submitted meanwhile
++}
++
+ void GifArbiter::drain()
+ {
+     if (!m_processFn)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+index 3f99c2b..5a0c9fb 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -15,8 +15,37 @@
+ #include <algorithm>
+ #include <string>
+ #include <vector>
++#include <mutex>
+ static const auto g_gowProcStart = std::chrono::steady_clock::now(); // GOW-Port: process start for diagnostics
+ 
++// GOW-Port: DMA transfer buffers are reused. A frame's VIF1 chain is ~3 MB: gathered into a fresh vector it reallocated
++// ~20 times and touched new pages each time (page faults on the EE thread), and the worker freed it again.
++namespace
++{
++    std::mutex g_dmaBufferMutex;
++    std::vector<std::vector<uint8_t>> g_dmaBuffers;
++
++    std::vector<uint8_t> takeDmaBuffer()
++    {
++        std::lock_guard<std::mutex> lock(g_dmaBufferMutex);
++        if (g_dmaBuffers.empty())
++            return {};
++        std::vector<uint8_t> buffer = std::move(g_dmaBuffers.back());
++        g_dmaBuffers.pop_back();
++        return buffer;
++    }
++
++    void returnDmaBuffer(std::vector<uint8_t> &&buffer)
++    {
++        if (buffer.capacity() == 0u)
++            return;
++        buffer.clear(); // keeps the capacity
++        std::lock_guard<std::mutex> lock(g_dmaBufferMutex);
++        if (g_dmaBuffers.size() < 4u)
++            g_dmaBuffers.push_back(std::move(buffer));
++    }
++}
++
+ namespace
+ {
+     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
+@@ -446,6 +475,8 @@ uint32_t PS2Memory::eeTimerLoad(uint32_t address) noexcept
+     uint32_t offset = 0u;
+     if (!decodeEeTimerRegister(eeTimerPhysical(address), index, offset))
+         return 0u;
++    if (m_eeCycleSync)
++        m_eeCycleSync(m_eeCycleSyncContext, false);
+     flushEeTimers();
+     const EeTimer &timer = m_eeTimers[index];
+     switch (offset)
+@@ -478,6 +509,8 @@ bool PS2Memory::eeTimerStore(uint32_t address, uint32_t value) noexcept
+     uint32_t offset = 0u;
+     if (!decodeEeTimerRegister(eeTimerPhysical(address), index, offset))
+         return false;
++    if (m_eeCycleSync)
++        m_eeCycleSync(m_eeCycleSyncContext, true);
+     flushEeTimers();
+     m_eeTimerBudget = 0; // recompute the distance to the next interrupt at the next advance
+     EeTimer &timer = m_eeTimers[index];
+@@ -1759,7 +1792,6 @@ bool PS2Memory::processScratchpadChain(uint32_t channelBase, uint32_t chcr)
+     return true;
+ }
+ 
+-static void gsWorkerTrace(const char *what, size_t bytes);
+ 
+ // GOW-Port: native DMA data path (docs/native-port.md, step 2). Bytes of guest memory (RAM or scratchpad) in order, with
+ // the RAM wrap of the former transfer loops.
+@@ -1790,7 +1822,7 @@ void PS2Memory::appendGuestBytes(uint32_t address, uint32_t bytes, std::vector<u
+ 
+ void PS2Memory::sendDma(DmaPath path, uint32_t address, uint32_t qwc)
+ {
+-    std::vector<uint8_t> bytes;
++    std::vector<uint8_t> bytes = takeDmaBuffer();
+     appendGuestBytes(address, qwc * 16u, bytes);
+     deliverDma(path, std::move(bytes));
+ }
+@@ -1806,7 +1838,7 @@ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+     const bool transferTags = path != DmaPath::Gif && config != m_ioRegisters.end() && (config->second & 0x40u) != 0u;
+     uint32_t returnStack[2] = {};
+     uint32_t depth = 0u;
+-    std::vector<uint8_t> bytes;
++    std::vector<uint8_t> bytes = takeDmaBuffer();
+     int tags = 0;
+     for (; tags < kMaxTags; ++tags)
+     {
+@@ -1904,12 +1936,16 @@ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+ void PS2Memory::deliverDma(DmaPath path, std::vector<uint8_t> &&bytes)
+ {
+     if (bytes.empty())
++    {
++        returnDmaBuffer(std::move(bytes));
+         return;
++    }
+     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     const uint32_t size = static_cast<uint32_t>(bytes.size());
+     if (path == DmaPath::Vif0)
+     {
+         processVIF0Data(bytes.data(), size);
++        returnDmaBuffer(std::move(bytes));
+         return;
+     }
+     if (m_gsWorkerEnabled)
+@@ -1937,10 +1973,11 @@ void PS2Memory::deliverDma(DmaPath path, std::vector<uint8_t> &&bytes)
+     }
+     if (m_gifArbiter)
+         m_gifArbiter->drain();
++    returnDmaBuffer(std::move(bytes));
+ }
+ 
+ // GOW-Port: PS2X_GS_WORKER_TRACE (see PS2Runtime::dispatchGuestBranch): worker kick/start/done times.
+-static void gsWorkerTrace(const char *what, size_t bytes)
++void PS2Memory::gsWorkerTrace(const char *what, size_t bytes)
+ {
+     static const double traceFrom = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
+     if (traceFrom < 0.0)
+@@ -2006,6 +2043,8 @@ void PS2Memory::gsWorkerLoop()
+         }
+         if (m_gsWorkerWake && (gs_regs.csr.load(std::memory_order_acquire) & 0x3u) != 0u)
+             m_gsWorkerWake();
++        for (GsWorkerItem &item : job.items)
++            returnDmaBuffer(std::move(item.data));
+     }
+ }
+ 
+@@ -2170,13 +2209,12 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t
+         flushMaskedPath3Packets(false);
+     }
+ 
+-    if (m_gifArbiter)
++    if (m_gifArbiter && drainImmediately)
++        m_gifArbiter->submitAndDrain(pathId, data, sizeBytes, path2DirectHl);
++    else if (m_gifArbiter)
+         m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
+     else if (m_gifPacketCallback)
+         m_gifPacketCallback(data, sizeBytes);
+-
+-    if (m_gifArbiter && drainImmediately)
+-        m_gifArbiter->drain();
+ }
+ 
+ void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 5238296..2742990 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -488,6 +488,10 @@ PS2Runtime::PS2Runtime()
+     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
+ 
+     m_eeScheduler = std::make_unique<EeScheduler>(*this);
++    // EE timer registers read the guest EE clock: the scheduler hands over the cycles its fast path deferred first.
++    m_memory.setEeCycleSync([](void *scheduler, bool limitsChanged)
++                            { static_cast<EeScheduler *>(scheduler)->syncDeferredCycles(limitsChanged); },
++                            m_eeScheduler.get());
+ 
+     // GOW-Port: VU1 sin colas de escritura (un tercio más rápido); GOW_VU1_COLAS=1 vuelve al modelo con colas.
+     {
+@@ -634,6 +638,11 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+     m_iopSubsystem->runPendingEeCycles();
+ }
+ 
++uint64_t PS2Runtime::iopEeCyclesUntilBatch() const noexcept
++{
++    return m_iopSubsystem->eeCyclesUntilBatch();
++}
++
+ void PS2Runtime::resetIop()
+ {
+     m_iopSubsystem->reset();
+@@ -721,7 +730,10 @@ bool PS2Runtime::syncCoreSubsystems()
+                             [this]
+                             {
+                                 if (m_eeScheduler && (m_memory.gs().csr.load(std::memory_order_acquire) & 0x3u) != 0u)
++                                {
++                                    PS2Memory::gsWorkerTrace("gs-irq", m_memory.gs().csr.load(std::memory_order_relaxed) & 0x3u);
+                                     m_eeScheduler->postEvent(EeEvent{EeEventType::ExternalWake, 0xFFFFFFFFu, ~0ull});
++                                }
+                             });
+     m_gifArbiter.setProcessPathPacketFn([this](GifPathId path, const uint8_t *data, uint32_t size)
+                                     {
+@@ -1541,7 +1553,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    if (!hasFunction(targetPc))
++    // one table lookup (hasFunction + lookupFunction did two)
++    uint32_t targetSlot = 0u;
++    const RecompiledFunction targetFn =
++        generatedFunctionTableSlot(targetPc, targetSlot) ? g_ps2RecompiledFunctionTable[targetSlot] : nullptr;
++    if (targetFn == nullptr)
+     {
+         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+ 
+@@ -1563,7 +1579,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    RecompiledFunction targetFn = lookupFunction(targetPc);
++    pushDispatchPc(targetPc); // as lookupFunction
+     const uint32_t entryPc = ctx->pc;
+     const uint64_t checkpointSerial = m_eeCheckpointSerial;
+     const uint64_t jumpSerial = g_guestJumpSerial;
+@@ -2447,7 +2463,7 @@ void PS2Runtime::postEeEvent(EeEvent event)
+     m_eeScheduler->postEvent(event);
+ }
+ 
+-bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
++bool PS2Runtime::eeCheckpointDueFull(uint32_t cycles) noexcept
+ {
+     const bool due = m_eeScheduler->checkpointDue(cycles);
+     if (due) ++m_eeCheckpointSerial;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index b7895c6..ad747e9 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -33,6 +33,155 @@ enum VIFCmd : uint8_t
+     VIF_DIRECTHL = 0x51,
+ };
+ 
++// GOW-Port: VIF1 UNPACK without a write mask and with CL >= WL (every write cycle reads source data): the format,
++// the STMOD mode and the vector layout are fixed per command, so one specialised loop per (VN, VL, MODE) replaces the
++// per-vector, per-field decisions of the general loop below. Same results as that loop, including its quirks: V3 keeps
++// the W already in VU memory (and adds ROW to it in the offset modes), V2 writes XYXY, V4-5 never adds ROW. Each vector
++// is built and written as one 128-bit value (unpackVector), the sign/zero extension is a template parameter.
++namespace
++{
++    using UnpackFastFn = void (*)(uint8_t *vuData, const uint8_t *src, uint32_t count, uint32_t vuAddr, uint32_t cl,
++                                  uint32_t wl, bool zeroExtend, uint32_t row[4]);
++
++    template <unsigned VL, bool ZX>
++    inline uint32_t unpackComponent(const uint8_t *src, unsigned c)
++    {
++        if constexpr (VL == 0u)
++        {
++            uint32_t v;
++            std::memcpy(&v, src + c * 4u, 4u);
++            return v;
++        }
++        else if constexpr (VL == 1u)
++        {
++            uint16_t raw;
++            std::memcpy(&raw, src + c * 2u, 2u);
++            return ZX ? raw : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
++        }
++        else
++        {
++            const uint8_t raw = src[c];
++            return ZX ? raw : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(raw)));
++        }
++    }
++
++    inline uint32_t load32(const uint8_t *p)
++    {
++        uint32_t v;
++        std::memcpy(&v, p, 4u);
++        return v;
++    }
++
++    inline uint16_t load16(const uint8_t *p)
++    {
++        uint16_t v;
++        std::memcpy(&v, p, 2u);
++        return v;
++    }
++
++    // One source vector as the four words written to VU memory (`dest`: its current contents, for V3's W). The SSE
++    // intrinsics map to NEON through sse2neon on ARM. Reads exactly the vector's bytes (the packet may end right after).
++    template <unsigned VN, unsigned VL, bool ZX>
++    inline __m128i unpackVector(const uint8_t *src, const uint8_t *dest)
++    {
++        if constexpr (VL == 3u) // V4-5: RGBA 5551
++        {
++            const uint32_t packed = load16(src);
++            return _mm_setr_epi32(static_cast<int>((packed & 0x001Fu) << 3u), static_cast<int>((packed & 0x03E0u) >> 2u),
++                                  static_cast<int>((packed & 0x7C00u) >> 7u), static_cast<int>((packed & 0x8000u) >> 8u));
++        }
++        else if constexpr (VN == 0u)
++            return _mm_set1_epi32(static_cast<int>(unpackComponent<VL, ZX>(src, 0u)));
++        else
++        {
++            constexpr uint32_t bytes = (VN + 1u) * (VL == 0u ? 4u : VL == 1u ? 2u : 1u);
++            __m128i raw; // the components' bytes, from byte 0
++            if constexpr (bytes == 16u)
++                raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src));
++            else if constexpr (bytes == 12u)
++                raw = _mm_insert_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i *>(src)), static_cast<int>(load32(src + 8u)), 2);
++            else if constexpr (bytes == 8u)
++                raw = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(src));
++            else if constexpr (bytes == 6u)
++                raw = _mm_insert_epi16(_mm_cvtsi32_si128(static_cast<int>(load32(src))), load16(src + 4u), 2);
++            else if constexpr (bytes == 4u)
++                raw = _mm_cvtsi32_si128(static_cast<int>(load32(src)));
++            else if constexpr (bytes == 3u)
++                raw = _mm_cvtsi32_si128(static_cast<int>(load16(src) | (static_cast<uint32_t>(src[2]) << 16u)));
++            else
++                raw = _mm_cvtsi32_si128(load16(src));
++            __m128i v;
++            if constexpr (VL == 0u)
++                v = raw;
++            else if constexpr (VL == 1u)
++                v = ZX ? _mm_cvtepu16_epi32(raw) : _mm_cvtepi16_epi32(raw);
++            else
++                v = ZX ? _mm_cvtepu8_epi32(raw) : _mm_cvtepi8_epi32(raw);
++            if constexpr (VN == 1u)
++                v = _mm_unpacklo_epi64(v, v); // XYXY
++            else if constexpr (VN == 2u)
++                v = _mm_insert_epi32(v, static_cast<int>(load32(dest + 12u)), 3); // W stays
++            return v;
++        }
++    }
++
++    template <unsigned VN, unsigned VL, unsigned MODE, bool ZX>
++    void unpackLoop(uint8_t *vuData, const uint8_t *src, uint32_t count, uint32_t vuAddr, uint32_t cl, uint32_t wl,
++                    uint32_t row[4])
++    {
++        constexpr bool v45 = (VL == 3u);
++        constexpr bool useRow = !v45 && MODE != 0u;
++        constexpr uint32_t bytesPerVector = v45 ? 2u : (VN + 1u) * (VL == 0u ? 4u : VL == 1u ? 2u : 1u);
++        __m128i r = useRow ? _mm_loadu_si128(reinterpret_cast<const __m128i *>(row)) : _mm_setzero_si128();
++        uint32_t block = 0u, cyclePos = 0u;
++        for (uint32_t i = 0; i < count; ++i, src += bytesPerVector)
++        {
++            uint8_t *dest = vuData + ((vuAddr + block * cl + cyclePos) & 0x3FFu) * 16u;
++            if (++cyclePos == wl)
++            {
++                cyclePos = 0u;
++                ++block;
++            }
++            __m128i v = unpackVector<VN, VL, ZX>(src, dest);
++            if constexpr (useRow && MODE == 1u)
++                v = _mm_add_epi32(v, r);
++            else if constexpr (useRow && MODE == 2u)
++                r = v = _mm_add_epi32(v, r);
++            else if constexpr (useRow)
++                r = v;
++            _mm_storeu_si128(reinterpret_cast<__m128i *>(dest), v);
++        }
++        if constexpr (useRow && MODE >= 2u)
++            _mm_storeu_si128(reinterpret_cast<__m128i *>(row), r);
++    }
++
++    template <unsigned VN, unsigned VL, unsigned MODE>
++    void unpackFast(uint8_t *vuData, const uint8_t *src, uint32_t count, uint32_t vuAddr, uint32_t cl, uint32_t wl,
++                    bool zeroExtend, uint32_t row[4])
++    {
++        if (zeroExtend)
++            unpackLoop<VN, VL, MODE, true>(vuData, src, count, vuAddr, cl, wl, row);
++        else
++            unpackLoop<VN, VL, MODE, false>(vuData, src, count, vuAddr, cl, wl, row);
++    }
++
++    template <unsigned VN, unsigned VL>
++    constexpr UnpackFastFn kUnpackModes[4] = {unpackFast<VN, VL, 0u>, unpackFast<VN, VL, 1u>, unpackFast<VN, VL, 2u>,
++                                              unpackFast<VN, VL, 3u>};
++
++    // nullptr: a format the general loop handles (V1/V2/V3 with VL 3)
++    UnpackFastFn unpackFastFn(unsigned vn, unsigned vl, unsigned mode)
++    {
++        static constexpr const UnpackFastFn *table[16] = {
++            kUnpackModes<0, 0>, kUnpackModes<0, 1>, kUnpackModes<0, 2>, nullptr,
++            kUnpackModes<1, 0>, kUnpackModes<1, 1>, kUnpackModes<1, 2>, nullptr,
++            kUnpackModes<2, 0>, kUnpackModes<2, 1>, kUnpackModes<2, 2>, nullptr,
++            kUnpackModes<3, 0>, kUnpackModes<3, 1>, kUnpackModes<3, 2>, kUnpackModes<3, 3>};
++        const UnpackFastFn *modes = table[(vn & 3u) * 4u + (vl & 3u)];
++        return modes ? modes[mode & 3u] : nullptr;
++    }
++}
++
+ void PS2Memory::processVIF0Data(uint32_t srcPhys, uint32_t sizeBytes)
+ {
+     if (sizeBytes == 0u || srcPhys >= PS2_RAM_SIZE)
+@@ -478,10 +627,15 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                 uint32_t copyBytes = mpgBytes;
+                 if (destAddr + copyBytes > PS2_VU1_CODE_SIZE)
+                     copyBytes = PS2_VU1_CODE_SIZE - destAddr;
++                // GOW-Port: the game re-sends microprograms that are already there; only a real change of the code
++                // invalidates what was derived from it (native block slots, decoded pairs).
+                 if (pos + copyBytes <= sizeBytes)
+                 {
+-                    std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
+-                    markVU1CodeModified();
++                    if (std::memcmp(m_vu1Code + destAddr, data + pos, copyBytes) != 0)
++                    {
++                        std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
++                        markVU1CodeModified();
++                    }
+                 }
+                 else
+                     std::fprintf(stderr, "[vif1] MPG cut: dest=%x bytes=%u have=%u\n", destAddr, copyBytes, sizeBytes - pos);
+@@ -629,7 +783,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                         }
+                 }
+             }
+-            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
++            const UnpackFastFn fast = (!maskEnable && cl >= wl) ? unpackFastFn(vn, vl, vif1_regs.mode) : nullptr;
++            if (fast && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
++                fast(m_vu1Data, data + pos, writeVectorCount, vuAddr, cl, wl, zeroExtend, vif1_regs.row);
++            else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+             {
+                 const uint8_t *srcBase = data + pos;
+                 uint32_t srcIndex = 0u;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 3e8308c..ba8fd0d 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -30,6 +30,29 @@
+ #pragma fp_contract(off)
+ #endif
+ 
++// GOW-Port: the float control register for a VU run (x86 MXCSR, ARM64 FPCR), read and written directly. std::fesetround
++// (MSVC: x87 and SSE control words) and sse2neon's _mm_getcsr / _mm_setcsr (fegetround plus several FPCR reads and
++// writes) are library calls; run() and runNative switch the mode for each of the ~100k VU1 programs per second.
++namespace vu_fpmode
++{
++#if defined(__aarch64__)
++    inline uint64_t get()
++    {
++        uint64_t v;
++        __asm__ volatile("mrs %0, fpcr" : "=r"(v));
++        return v;
++    }
++    inline void set(uint64_t v) { __asm__ volatile("msr fpcr, %0" : : "r"(v) : "memory"); }
++    constexpr uint64_t kRoundMask = 3ull << 22, kRoundZero = 3ull << 22; // RMode = RZ
++    constexpr uint64_t kFlushZero = 1ull << 24;                          // FZ (inputs and results)
++#else
++    inline uint64_t get() { return _mm_getcsr(); }
++    inline void set(uint64_t v) { _mm_setcsr(static_cast<unsigned>(v)); }
++    constexpr uint64_t kRoundMask = 0x6000u, kRoundZero = 0x6000u; // RC = toward zero
++    constexpr uint64_t kFlushZero = 0x8040u;                       // FTZ + DAZ
++#endif
++}
++
+ namespace
+ {
+     // GOW-Port: GOW_XGKICK_IMMEDIATE se lee una vez (-1 = sin leer). getenv recorre el entorno
+@@ -104,6 +127,16 @@ void VU1Interpreter::setDirectRegisterWrites(bool enabled)
+     m_statusQuiet = false;
+ }
+ 
++namespace
++{
++    template <typename Queue>
++    void clearPending(Queue &queue, uint32_t &pending)
++    {
++        for (; pending != 0u; pending &= pending - 1u)
++            queue[static_cast<size_t>(std::countr_zero(pending))] = {};
++    }
++}
++
+ void VU1Interpreter::resetScheduler()
+ {
+     commitReadyFlags(); // GOW-Port: las ya listas se habrían confirmado en su ciclo
+@@ -112,11 +145,12 @@ void VU1Interpreter::resetScheduler()
+     m_flagPipeline = {};
+     m_fdiv = {};
+     m_efu = {};
+-    m_storePipeline = {};
+-    m_vfWritePipeline = {};
+-    m_viWritePipeline = {};
+-    m_accWritePipeline = {};
+-    m_storePending = m_vfPending = m_viPending = m_accPending = 0u;
++    // GOW-Port: an entry is valid exactly while its pending bit is set and is {} otherwise (committing resets it), so
++    // clearing the pending ones leaves the queues as `= {}` would, without writing ~1.5 KB at every MSCAL.
++    clearPending(m_storePipeline, m_storePending);
++    clearPending(m_vfWritePipeline, m_vfPending);
++    clearPending(m_viWritePipeline, m_viPending);
++    clearPending(m_accWritePipeline, m_accPending);
+     m_flagHead = m_flagCount = 0u;
+     m_xgkick.reset();
+     m_vfReady = {};
+@@ -127,9 +161,8 @@ void VU1Interpreter::resetScheduler()
+         m_native->arraysReadyBy = 0u;
+         m_native->exitCycle = m_cycle;
+     }
+-    m_vfLatestWrite = {};
+-    m_viLatestWrite = {};
+-    m_accLatestWrite = {};
++    // m_*LatestWrite are not cleared: a lane's entry is only compared with the sequence of a pending write of that lane,
++    // which set it when it was queued (after this reset), so older values are never looked at.
+     m_nextWriteSequence = 0;
+     m_efuResourceReady = 0;
+     m_workingClip = m_state.clip;
+@@ -1149,14 +1182,16 @@ namespace
+     std::vector<uint8_t> g_vuVerifyPackets;
+ }
+ 
+-void VU1Interpreter::finishXgkick()
++void VU1Interpreter::finishXgkick(const uint8_t *packet)
+ {
+     if (!m_xgkick.active)
+         return;
++    if (!packet)
++        packet = m_xgkick.packet.data();
+     if (m_verifySilent)
+     {
+         if (g_vuVerifyCapture)
+-            g_vuVerifyPackets.insert(g_vuVerifyPackets.end(), m_xgkick.packet.data(), m_xgkick.packet.data() + m_xgkick.totalBytes);
++            g_vuVerifyPackets.insert(g_vuVerifyPackets.end(), packet, packet + m_xgkick.totalBytes);
+         m_xgkick.active = false;
+         return;
+     }
+@@ -1167,7 +1202,7 @@ void VU1Interpreter::finishXgkick()
+     if (kickPrim >= 0)
+     {
+         static int kickShown = 0;
+-        const uint8_t *pk = m_xgkick.packet.data();
++        const uint8_t *pk = packet;
+         uint32_t off = 0, kicks = 0, noKicks = 0;
+         bool match = false;
+         while (off + 16u <= m_xgkick.totalBytes)
+@@ -1203,9 +1238,9 @@ void VU1Interpreter::finishXgkick()
+         }
+     }
+     if (m_activeMemory)
+-        m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
++        m_activeMemory->submitGifPacket(GifPathId::Path1, packet, m_xgkick.totalBytes);
+     else if (m_activeGs)
+-        m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
++        m_activeGs->processGIFPacket(packet, m_xgkick.totalBytes);
+     m_xgkick.active = false;
+ }
+ 
+@@ -1912,8 +1947,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     m_activeMemory = memory;
+ 
+     ps2_perf::Scope perf(ps2_perf::Bucket::Vu); // GOW-Port: VU0/VU1; las llamadas al GS se descuentan.
+-    const int previousRoundingMode = std::fegetround();
+-    const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
++    const uint64_t previousFpMode = vu_fpmode::get();
++    vu_fpmode::set((previousFpMode & ~vu_fpmode::kRoundMask) | vu_fpmode::kRoundZero); // VU float rounding
+     StepContext context{vuCode, codeSize, vuData, dataSize, &gs, memory, m_cycle + maxCycles, false};
+     m_lastRunHitBudget = false; // GOW-Port: funciona también con un despachador compilado.
+     const uint32_t runStartPc = m_state.pc;
+@@ -2244,8 +2279,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         if (++endMacRuns % 20000u == 0u)
+             std::fprintf(stderr, "[vu1-endmac] ours runs=%u mac12=%u mac0=%u other=%u\n", endMacRuns, endMacCount[0], endMacCount[1], endMacCount[2]);
+     }
+-    if (useVuRounding && previousRoundingMode != -1)
+-        std::fesetround(previousRoundingMode);
++    vu_fpmode::set(previousFpMode);
+ }
+ 
+ // GOW-Port: GOW_VU1C_VERIFICAR. Antes de un bloque compilado se ejecutan sus pares con el interprete desde el
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index f653e90..091edad 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -183,9 +183,21 @@ void VU1NativeAccess::xgkick(VU1NativeCtx &n, uint32_t qwordAddress)
+         }
+         if (ok)
+         {
+-            uint8_t *dst = vu.m_xgkick.packet.data();
+             const uint32_t first = src & (size - 1u);
+             const uint32_t head = std::min(total, size - first);
++            vu.m_xgkick.copiedBytes = total;
++            vu.m_xgkick.totalBytes = total;
++            vu.m_xgkick.currentTagEnd = total;
++            vu.m_xgkick.currentTagEop = true;
++            vu.m_xgkick.cycleCredit = 0x40000000u - (total / 16u) * 2u + 1u;
++            if (head == total)
++            {
++                // the packet is contiguous in VU memory and is handed on before the next VU instruction: no copy here
++                // (the GS stage queue copies it once, ~170 MB/s in gameplay)
++                vu.finishXgkick(vu.m_activeVuData + first);
++                return;
++            }
++            uint8_t *dst = vu.m_xgkick.packet.data();
+             std::memcpy(dst, vu.m_activeVuData + first, head);
+             for (uint32_t done = head; done < total;)
+             {
+@@ -193,11 +205,6 @@ void VU1NativeAccess::xgkick(VU1NativeCtx &n, uint32_t qwordAddress)
+                 std::memcpy(dst + done, vu.m_activeVuData, chunk);
+                 done += chunk;
+             }
+-            vu.m_xgkick.copiedBytes = total;
+-            vu.m_xgkick.totalBytes = total;
+-            vu.m_xgkick.currentTagEnd = total;
+-            vu.m_xgkick.currentTagEop = true;
+-            vu.m_xgkick.cycleCredit = 0x40000000u - (total / 16u) * 2u + 1u;
+             vu.finishXgkick();
+             return;
+         }
+@@ -612,6 +619,45 @@ void VU1NativeAccess::scalarStart(VU1Interpreter &vu, uint64_t issue, uint32_t l
+     vu.m_efuResourceReady = issue + (latency > 0u ? latency - 1u : 0u);
+ }
+ 
++// commitReadyPipelines once m_cycle reached m_nextCommitCycle after a native block. The blocks write their values
++// directly and queue only FDIV/EFU entries (kept for timing, scalarStart). While no other queue holds anything (the
++// usual case; otherwise commitReadyPipelines runs), only those entries can be due: retired here with the same effects
++// and the same next commit cycle as commitReadyPipelines, without its call and its scan of the other queues.
++VU1N_INLINE void VU1NativeAccess::commitDue(VU1Interpreter &vu)
++{
++    if ((vu.m_storePending | vu.m_vfPending | vu.m_viPending | vu.m_accPending) != 0u || vu.m_flagCount != 0u)
++    {
++        vu.commitReadyPipelines();
++        return;
++    }
++    uint64_t next = ~0ull;
++    if (vu.m_fdiv.valid)
++    {
++        if (vu.m_fdiv.readyCycle <= vu.m_cycle)
++        {
++            vu.m_state.q = vu.m_fdiv.value;
++            const uint32_t currentDi = vu.m_fdiv.statusDi & 0x30u;
++            vu.m_state.status = (vu.m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
++            vu.m_fdiv.valid = false;
++        }
++        else
++            next = vu.m_fdiv.readyCycle;
++    }
++    for (VU1Interpreter::ScalarPipelineEntry &entry : vu.m_efu)
++    {
++        if (!entry.valid)
++            continue;
++        if (entry.readyCycle <= vu.m_cycle)
++        {
++            vu.m_state.p = entry.value;
++            entry.valid = false;
++        }
++        else
++            next = std::min(next, entry.readyCycle);
++    }
++    vu.m_nextCommitCycle = next;
++}
++
+ // After a native block: it joins the history (its results that outlive it are found there when needed); FDIV/EFU stay
+ // busy until their ready cycle.
+ VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, const uint8_t *cyc,
+@@ -619,7 +665,8 @@ VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU
+ {
+     using NS = VU1Interpreter::NativeState;
+     NS &ns = *vu.m_native;
+-    const uint64_t end = start + cyc[sl.pairs - 1u] + 1u;
++    // the idle table's length is in the slot: most blocks never touch their table's cache line here
++    const uint64_t end = start + (cyc == sl.idle ? sl.idleEnd : cyc[sl.pairs - 1u] + 1u);
+     NS::Hist &h = ns.hist[ns.histNext];
+     h.bt = sl.bt;
+     h.cyc = cyc;
+@@ -645,6 +692,45 @@ VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU
+     }
+ }
+ 
++// The micro memory has a new generation (VIF MPG, EE writes): slots whose extent scan read a changed pair are set up again
++// on their next use; the others keep their block (the game swaps one microprogram while the rest stays resident).
++void VU1NativeAccess::codeChanged(VU1Interpreter::NativeState &ns, const uint8_t *code)
++{
++    using NS = VU1Interpreter::NativeState;
++    constexpr uint32_t kPairs = sizeof(ns.code) / 8u;
++    static_assert(kPairs == std::size(ns.slots));
++    ++ns.codeChanges;
++    if (!ns.codeValid)
++    {
++        for (NS::Slot &sl : ns.slots)
++            sl.known = false;
++        std::memcpy(ns.code, code, sizeof(ns.code));
++        ns.codeValid = true;
++        return;
++    }
++    // changedBefore[i]: changed pairs among 0..i-1 (prefix count), so a slot's range test is one subtraction
++    thread_local uint16_t changedBefore[kPairs + 1];
++    uint32_t changed = 0;
++    for (uint32_t i = 0; i < kPairs; ++i)
++    {
++        changedBefore[i] = static_cast<uint16_t>(changed);
++        changed += std::memcmp(ns.code + i * 8u, code + i * 8u, 8u) != 0;
++    }
++    changedBefore[kPairs] = static_cast<uint16_t>(changed);
++    if (changed == 0u)
++        return;
++    for (uint32_t i = 0; i < kPairs; ++i)
++    {
++        NS::Slot &sl = ns.slots[i];
++        if (!sl.known)
++            continue;
++        const uint32_t end = std::min<uint32_t>(kPairs, i + sl.pairs + 1u); // the pair after the block ends the scan
++        if (changedBefore[end] != changedBefore[i])
++            sl.known = false;
++    }
++    std::memcpy(ns.code, code, sizeof(ns.code));
++}
++
+ // The dispatch slot of pc, set up on first use (native block lookup, timing tables).
+ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint32_t pc)
+ {
+@@ -653,6 +739,7 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+     if (!sl.known)
+     {
+         uint32_t words[128];
++        ++ns.slotSetups;
+         const uint32_t count = nativeExtent(code, codeSize, pc, words);
+         sl = {};
+         sl.known = true;
+@@ -670,6 +757,7 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+                 bt.readsEntryFlags = it->second.readsEntryFlags;
+                 sl.fn = it->second.fn;
+                 sl.idle = it->second.cyc.data();
++                sl.idleEnd = static_cast<uint16_t>(sl.idle[count - 1u] + 1u);
+                 sl.bt = &bt;
+                 sl.readsEntryFlags = bt.readsEntryFlags;
+                 sl.memoable = bt.scalarRead == 0u;
+@@ -715,11 +803,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+     if (generation != ns.generation)
+     {
+         ns.generation = generation;
+-        for (NativeState::Slot &sl : ns.slots)
+-            sl.known = false;
++        VU1NativeAccess::codeChanged(ns, context.vuCode);
+     }
+ 
+-    const unsigned savedCsr = _mm_getcsr();
++    const uint64_t savedFpMode = vu_fpmode::get();
+     bool armed = false; // pending exact-engine pipelines are committed only when a native block really runs
+     VU1NativeCtx ctx;
+     ctx.s = &m_state;
+@@ -731,6 +818,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+     ctx.clipRing = &ns.clipRing;
+ 
+     bool handled = false;
++    // per-block bookkeeping kept in registers across the block calls (the blocks are opaque calls: anything in memory is
++    // reloaded after each one): diagnostics counters added to ns on exit, the verify bisection limit fixed for the run
++    const bool bisecting = ns.limit != ~0u;
++    uint64_t blocks = 0u, pairs = 0u;
+     for (;;)
+     {
+         if (m_stopRequested || m_cycle >= context.budgetEnd)
+@@ -774,10 +865,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+                 ns.arraysReadyBy = readyBy;
+             }
+             ++ns.nativeRuns;
+-            _mm_setcsr((savedCsr & ~0x6000u) | 0x6000u | 0x8000u | 0x0040u); // round toward zero, FTZ, DAZ
++            vu_fpmode::set((savedFpMode & ~vu_fpmode::kRoundMask) | vu_fpmode::kRoundZero | vu_fpmode::kFlushZero);
+             armed = true;
+         }
+-        if (ns.limit != ~0u)
++        if (bisecting)
+         {
+             if (ns.count >= ns.limit)
+                 break;
+@@ -804,10 +895,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+         }
+         const uint32_t result = fn(ctx);
+         VU1NativeAccess::finishBlockTiming(*this, sl, cyc, cycId, start);
+-        m_state.cycles = m_cycle;
+         if (m_cycle >= m_nextCommitCycle)
+-            commitReadyPipelines(); // FDIV/EFU entries kept for timing retire when ready (values are written already)
+-        ns.nativePairs += sl.pairs;
++            VU1NativeAccess::commitDue(*this); // FDIV/EFU entries kept for timing retire when ready (values are written already)
++        pairs += sl.pairs;
++        ++blocks;
+         m_state.pc = result & 0x3FFFu;
+         if (result & kVu1nEnded)
+         {
+@@ -818,22 +909,25 @@ bool VU1Interpreter::runNative(StepContext &context)
+         if (result & kVu1nBail)
+             break;
+     }
++    ns.nativePairs += pairs;
++    ns.nativeBlocks += blocks;
++    m_state.cycles = m_cycle; // only read outside the blocks (diagnostics)
+     if (armed)
+     {
+         VU1NativeAccess::syncInflight(*this); // the exact engine continues: its readiness arrays become current
+         VU1NativeAccess::exportFlags(*this);
+         ns.exitCycle = m_cycle;
+     }
+-    _mm_setcsr(savedCsr);
++    vu_fpmode::set(savedFpMode);
+     if (ns.diag)
+     {
+         static auto last = std::chrono::steady_clock::now();
+         if (std::chrono::steady_clock::now() - last > std::chrono::seconds(5))
+         {
+             last = std::chrono::steady_clock::now();
+-            std::fprintf(stderr, "[vu1n] nativePairs=%llu missBlocks=%llu nativeEntries=%llu distinctMissPcs=%zu\n", ns.nativePairs,
+-                         ns.missBlocks, ns.nativeRuns, ns.missPcs.size());
+-            ns.nativePairs = ns.missBlocks = ns.nativeRuns = 0;
++            std::fprintf(stderr, "[vu1n] nativePairs=%llu nativeBlocks=%llu missBlocks=%llu nativeEntries=%llu distinctMissPcs=%zu codeChanges=%llu slotSetups=%llu\n",
++                         ns.nativePairs, ns.nativeBlocks, ns.missBlocks, ns.nativeRuns, ns.missPcs.size(), ns.codeChanges, ns.slotSetups);
++            ns.nativePairs = ns.nativeBlocks = ns.missBlocks = ns.nativeRuns = ns.codeChanges = ns.slotSetups = 0;
+             std::vector<std::pair<unsigned, uint32_t>> top;
+             for (const auto &kv : ns.missHits)
+                 top.emplace_back(kv.second, kv.first);

@@ -1,0 +1,26 @@
+Fullscreen start and F11 crashed on Windows (0xC0000005): raylib's GetWindowHandle() returns the native HWND there, not
+the GLFWwindow* that glfwSetWindowAttrib expects; the raylib window is the main thread's current GLFW context.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+index 044abea..86a0a5a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -41,6 +41,9 @@ void gowTrucosMenuDibujar();
+ void gowTrucosVBlank(uint8_t *rdram);
+ #if !defined(PLATFORM_VITA) && !defined(__ANDROID__)
+ extern "C" void glfwSetWindowAttrib(void *window, int attrib, int value); // GLFW va enlazado dentro de raylib
++// God-Of-War-Native-Port: raylib's GetWindowHandle() is the native HWND on Windows, not the GLFWwindow* GLFW wants (the
++// fullscreen start and F11 crashed with an access violation); the main thread's current context is raylib's window.
++extern "C" void *glfwGetCurrentContext(void);
+ #endif
+ 
+ namespace
+@@ -97,7 +100,7 @@ namespace
+             SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
+ #if !defined(PLATFORM_VITA) && !defined(__ANDROID__)
+             // Sin minimizar al perder el foco (GLFW_AUTO_ICONIFY): con la ventana minimizada el framebuffer mide 0.
+-            glfwSetWindowAttrib(GetWindowHandle(), 0x00020006 /* GLFW_AUTO_ICONIFY */, 0 /* GLFW_FALSE */);
++            glfwSetWindowAttrib(glfwGetCurrentContext(), 0x00020006 /* GLFW_AUTO_ICONIFY */, 0 /* GLFW_FALSE */);
+ #endif
+             ToggleFullscreen();
+         }
