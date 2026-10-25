@@ -4,6 +4,7 @@
 //
 // build (Developer prompt): cl /O2 /EHsc /std:c++20 sampler.cpp dbghelp.lib
 // usage: sampler.exe <pid | exe name> <seconds> [delay seconds] [top N]
+//        SAMPLER_LINES=<text>: also the source lines of the functions whose name contains <text>
 #include <windows.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <thread>
@@ -152,6 +154,32 @@ int main(int argc, char **argv)
         std::printf("\n== %s: %u samples\n", t->name.c_str(), t->samples);
         for (int i = 0; i < top && i < static_cast<int>(rows.size()); ++i)
             std::printf("%6.2f%%  %s\n", 100.0 * rows[i].first / t->samples, rows[i].second.c_str());
+        // SAMPLER_LINES=<text>: for functions whose name contains it, the source lines where the samples landed
+        if (const char *want = std::getenv("SAMPLER_LINES"))
+        {
+            std::unordered_map<std::string, unsigned> byLine;
+            for (auto &[addr, n] : t->hits)
+            {
+                auto *sym = reinterpret_cast<SYMBOL_INFO *>(symBuf);
+                sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                sym->MaxNameLen = 511;
+                DWORD64 disp = 0;
+                if (!SymFromAddr(proc, addr, &disp, sym) || !std::strstr(sym->Name, want))
+                    continue;
+                IMAGEHLP_LINE64 line{sizeof(line)};
+                DWORD lineDisp = 0;
+                std::string key = SymGetLineFromAddr64(proc, addr, &lineDisp, &line)
+                                      ? std::string(std::strrchr(line.FileName, '\\') ? std::strrchr(line.FileName, '\\') + 1 : line.FileName) + ":" + std::to_string(line.LineNumber)
+                                      : std::string(sym->Name) + "+?";
+                byLine[key] += n;
+            }
+            std::vector<std::pair<unsigned, std::string>> lines;
+            for (auto &[key, n] : byLine)
+                lines.emplace_back(n, key);
+            std::sort(lines.rbegin(), lines.rend());
+            for (int i = 0; i < 40 && i < static_cast<int>(lines.size()); ++i)
+                std::printf("   line %6.2f%%  %s\n", 100.0 * lines[i].first / t->samples, lines[i].second.c_str());
+        }
     }
     return 0;
 }

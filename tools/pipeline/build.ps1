@@ -20,6 +20,8 @@
 #        recomp,sync,build] [-Discs "<iso>|<iso>"] [-Config Release|RelWithDebInfo] [-Ltcg] [-Pdb] [-BuildRoot <folder>]
 # -BuildRoot: default C:\gow-build (or C:\gow-build-<hash> when another copy uses it), kept in data\build-root.txt
 # -Pdb: Release with debug information (ps2EntryRunner.pdb) for profilers; the optimised code is the same
+# -Codegen locals (default): recomp stage with register-locals code generation (engine/patches/08, ~22 % less EE
+#        thread time); -Codegen classic generates the code as before patch 08
 param(
     [string]$Game = 'gow1',
     [string[]]$Stages = @('fetch', 'discs', 'configure', 'recomp', 'sync', 'build'),
@@ -27,6 +29,7 @@ param(
     [ValidateSet('Release', 'RelWithDebInfo')][string]$Config = 'Release',
     [switch]$Ltcg,
     [switch]$Pdb,
+    [ValidateSet('classic', 'locals')][string]$Codegen = 'locals',
     [string]$BuildRoot = '',
     [int]$Seconds = 0
 )
@@ -217,9 +220,11 @@ if ($Stages -contains 'recomp') {
         -replace '@MAP@', (Barra (Join-Path $gen 'funcmap.csv')) `
         -replace '@OUT@', ((Barra $out) + '/') | Set-Content (Join-Path $gen 'recomp.toml') -Encoding ASCII
     $ErrorActionPreference = 'Continue'   # ~2000 control-flow warnings on stderr are expected
+    if ($Codegen -eq 'locals') { $env:PS2X_CODEGEN = 'locals'; Write-Host 'code generation: register locals' }
     & (Join-Path $bld 'ps2xRecomp\ps2_recomp.exe') (Join-Path $gen 'recomp.toml') *>&1 | ForEach-Object { "$_" } |
         Out-File -Encoding utf8 (Join-Path $logs 'recomp.log')
     $rc = $LASTEXITCODE
+    Remove-Item env:PS2X_CODEGEN -ErrorAction SilentlyContinue
     $ErrorActionPreference = 'Stop'
     if ($rc -ne 0) { throw 'ps2_recomp failed (data\<game>\logs\recomp.log)' }
     Write-Host ("generated: {0} files" -f (Get-ChildItem $out -File).Count)

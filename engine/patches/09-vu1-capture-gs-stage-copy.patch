@@ -1,0 +1,127 @@
+VU1 worker costs with the launcher's settings (the launcher always records VU1 microcode while playing, GOW_VU1_CAPTURA):
+- Capture on the native VU1 path (captureMicrocode): it went through compiledProgramFor on every micro-memory change
+  (~650 a second in combat): a full decode of the 2,048 pairs (the exact engine redecodes lazily anyway), a byte-wise
+  16 KB FNV hash and a file-system query (NtQueryFullAttributesFile alone was 9 % of the VU1 worker). Now a word-wise
+  64-bit hash is looked up among the images already seen this run and the capture folder is listed once; only a new image
+  gets its FNV file name and is written, so the files are the same as before (673 new files of a run checked: names =
+  FNV of the contents).
+- GS stage push: the packet is copied before taking the stage lock (the copy under it made the stage thread and the VU1
+  worker wait on each other for every XGKICK).
+Measured on the ship with the launcher's defaults (full screen 1920x1080, 16:9, FXAA, 2x dynamic, sound, capture; Xeon
+E5-2666 v3, RX 580; with 01-08 and -Codegen locals): combat 44-52 fps (average 47.6) -> 53-60 (average 57.6). With it,
+capture off or 4:3 change the combat average by about 1 fps.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+index 1fc0d9f..4f01275 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+@@ -117,16 +117,21 @@ namespace ps2_gs_stage
+     void push(GifPathId path, const uint8_t *data, uint32_t size)
+     {
+         Stage &s = stage();
+-        std::unique_lock<std::mutex> lock(s.mutex);
+-        s.space.wait(lock, [&s, size] { return s.queuedBytes == 0 || s.queuedBytes + size <= kMaxQueuedBytes; });
++        // gow-native-pc: the packet is copied before taking the lock (the copy under it made the stage thread and the
++        // VU1 worker wait on each other for every XGKICK); a spare buffer is still taken under the lock
+         Packet p;
+         p.path = path;
+-        if (!s.spare.empty())
+         {
+-            p.data = std::move(s.spare.back());
+-            s.spare.pop_back();
++            std::lock_guard<std::mutex> spareLock(s.mutex);
++            if (!s.spare.empty())
++            {
++                p.data = std::move(s.spare.back());
++                s.spare.pop_back();
++            }
+         }
+         p.data.assign(data, data + size);
++        std::unique_lock<std::mutex> lock(s.mutex);
++        s.space.wait(lock, [&s, size] { return s.queuedBytes == 0 || s.queuedBytes + size <= kMaxQueuedBytes; });
+         s.queuedBytes += size;
+         const bool wasEmpty = s.queue.empty();
+         s.queue.push_back(std::move(p));
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 2042bbd..299e2e1 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -18,9 +18,12 @@
+ #include <filesystem>
+ #include <limits>
+ #include <string>
++#include <unordered_set>
+ #include <ps2_log.h>
+ #include "runtime/ps2_perf.h"
+ 
++void captureMicrocode(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory); // gow-native-pc, below
++
+ // GOW-Port: la aritmética de VU no depende de /fp:fast. El runtime se compila con /fp:fast, que deja al
+ // compilador fusionar a*b+c en FMA según dónde esté el código: el intérprete y el microcódigo compilado
+ // (o dos versiones del intérprete) podían dar resultados distintos. Aquí cada operación se redondea por
+@@ -2223,10 +2226,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     }
+     if (m_unit == Unit::VU1 && m_native && m_native->enabled && vuData && codeSize == PS2_VU1_CODE_SIZE)
+     {
+-        // GOW_VU1_CAPTURA records also while the native VU1 runs (compiledProgramFor saves the micro-memory).
++        // GOW_VU1_CAPTURA records also while the native VU1 runs (the launcher keeps it on while playing).
+         static const bool captureWithNative = std::getenv("GOW_VU1_CAPTURA") != nullptr;
+         if (captureWithNative)
+-            (void)compiledProgramFor(vuCode, codeSize, memory);
++            captureMicrocode(vuCode, codeSize, memory);
+         if (!runNativeLoop(context))
+             runExact(context);
+     }
+@@ -2459,6 +2462,52 @@ VU1Interpreter::CompiledProgramFn VU1Interpreter::compiledProgramFor(uint8_t *vu
+     return m_compiledEnabled ? g_compiledProgram.load(std::memory_order_acquire) : nullptr;
+ }
+ 
++// gow-native-pc: the continuous capture on the native path. compiledProgramFor did it on every micro-memory change
++// (~650 a second in combat): a full decode of the 2,048 pairs (the exact engine redecodes lazily anyway), a byte-wise
++// 16 KB FNV hash and a file-system query, ~15 % of the VU1 worker. Here a word-wise 64-bit hash is looked up among the
++// images already seen (the capture folder is listed once); only a new image gets its FNV file name and is written, so
++// the files are the same as before.
++void captureMicrocode(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory)
++{
++    static const char *captureDir = std::getenv("GOW_VU1_CAPTURA");
++    if (captureDir == nullptr || memory == nullptr || codeSize != PS2_VU1_CODE_SIZE || (codeSize & 7u) != 0u)
++        return;
++    static uint64_t lastGeneration = ~0ull;
++    const uint64_t generation = memory->getVU1CodeGeneration();
++    if (generation == lastGeneration)
++        return;
++    lastGeneration = generation;
++    uint64_t quick = 0x9E3779B97F4A7C15ull ^ codeSize;
++    for (uint32_t i = 0; i < codeSize; i += 8u)
++    {
++        uint64_t word;
++        std::memcpy(&word, vuCode + i, sizeof(word));
++        quick = (quick ^ (word * 0xBF58476D1CE4E5B9ull)) * 0x94D049BB133111EBull;
++        quick ^= quick >> 31;
++    }
++    static std::unordered_set<uint64_t> seenQuick;
++    if (!seenQuick.insert(quick).second)
++        return;
++    static const std::unordered_set<std::string> savedNames = []
++    {
++        std::unordered_set<std::string> names;
++        std::error_code error;
++        for (const auto &entry : std::filesystem::directory_iterator(captureDir, error))
++            names.insert(entry.path().filename().string());
++        return names;
++    }();
++    char name[64];
++    std::snprintf(name, sizeof(name), "vu1_%016llx.bin",
++                  static_cast<unsigned long long>(VU1Interpreter::hashMicrocode(vuCode, codeSize)));
++    if (savedNames.contains(name))
++        return;
++    if (std::FILE *file = std::fopen((std::string(captureDir) + "/" + name).c_str(), "wb"))
++    {
++        std::fwrite(vuCode, 1, codeSize, file);
++        std::fclose(file);
++    }
++}
++
+ // GOW-Port: volver a leer las variables de entorno de VU1 (las pruebas cambian GOW_XGKICK_IMMEDIATE).
+ void ps2Vu1ReloadEnvironmentOptions()
+ {
