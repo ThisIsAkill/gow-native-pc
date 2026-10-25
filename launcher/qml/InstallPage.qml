@@ -3,9 +3,10 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// Install tab: requirements, the runtime (PS2Recomp + Tobiichi, downloaded), the game discs (one or more ISOs, their
-// language detected) and the build with live progress. Backed by "installer" (src/installer_backend.cpp), which runs
-// tools/pipeline/build.ps1.
+// Install tab: three steps, each one click. 1. the build tools (downloaded into data/_tools), 2. the game ISO (language
+// detected), 3. install: runtime, disc, build and the first-play preparation in one run, with one progress bar.
+// Maintenance actions (runtime repair, quick rebuild, visited areas) are folded away below. Backed by "installer"
+// (src/installer_backend.cpp), which runs tools/pipeline/build.ps1.
 ScrollView {
     id: root
     contentWidth: availableWidth
@@ -14,12 +15,17 @@ ScrollView {
     property var env: installer.environment()
     property var discs: []          // identified ISOs: [{path, label, language, kind, compatible, problems}]
     property var languages: installer.languages()
+    property var pendingIsos: []    // chosen before the tools existed: identified once they are downloaded
     property string step: ""
     property string status: ""
     property int done: 0
     property int total: 0
+    property int stepIndex: 0       // steps seen in the current run (for the overall progress line)
     property var log: []
-    property bool optimize: true   // the first build records and compiles the native code
+    property bool showLog: false
+    property bool showMore: false
+    property bool prepareFirstPlay: true   // the install ends with the first-play preparation (optimize stage)
+    property bool lastOk: true
 
     function refresh() {
         env = installer.environment()
@@ -32,18 +38,37 @@ ScrollView {
         return out
     }
     function addLog(line) {
-        var l = log.slice(-300)
+        var l = log.slice(-400)
         l.push(line)
         log = l
     }
-    function startBuild(full) {
-        log = []; done = 0; total = 0; status = ""
-        var stages = full ? "fetch,discs,configure,recomp,sync,build" : "sync,build"
-        if (full && compatibleIsos().length === 0 && languages.length > 0)
-            stages = "fetch,configure,recomp,sync,build"
-        if (optimize) stages += ",optimize"
+    function begin() { log = []; done = 0; total = 0; status = ""; stepIndex = 0; lastOk = true }
+    function install() {
+        begin()
+        var stages = "tools,fetch"
+        if (compatibleIsos().length > 0) stages += ",discs"
+        stages += ",configure,recomp,sync,build"
+        if (prepareFirstPlay) stages += ",optimize"
         installer.run(stages, { isos: compatibleIsos(), config: "Release" })
     }
+    function maintenance(stages) { begin(); installer.run(stages, { config: "Release" }) }
+    function pickIsos(paths) {
+        if (env.tools) { installer.identify(paths); return }
+        pendingIsos = paths                 // reading an ISO needs the portable Python: fetch the tools first
+        begin()
+        installer.run("tools", {})
+    }
+    // friendly name of a pipeline step ("=== <step> ===" lines of build.ps1)
+    function stepLabel(s) {
+        var map = [["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
+                   ["configure", "instStepConfigure"], ["recompile", "instStepRecomp"], ["generated code", "instStepSync"],
+                   ["build the game", "instStepBuild"], ["record", "instStepRecord"], ["native VU1", "instStepNative"],
+                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"]]
+        for (var i = 0; i < map.length; ++i)
+            if (s.indexOf(map[i][0]) === 0 || s.indexOf(map[i][0]) > 0) return Tema.t(map[i][1])
+        return s
+    }
+    readonly property bool canInstall: !installer.running && (compatibleIsos().length > 0 || languages.length > 0)
 
     Connections {
         target: installer
@@ -56,13 +81,23 @@ ScrollView {
             }
             root.discs = merged
         }
-        function onStepChanged(s) { root.step = s; root.status = ""; root.done = 0; root.total = 0; root.addLog("— " + s) }
+        function onStepChanged(s) {
+            root.step = s; root.status = ""; root.done = 0; root.total = 0; root.stepIndex += 1
+            root.addLog("— " + s)
+        }
         function onProgress(d, t) { root.done = d; root.total = t }
         function onStatusText(t) { root.status = t }
         function onLogLine(l) { root.addLog(l) }
         function onFinished(ok, code) {
+            root.lastOk = ok
             root.step = ok ? Tema.t("instDone") : Tema.tf("instFailed", code)
+            if (!ok) root.showLog = true
             root.refresh()
+            if (ok && root.pendingIsos.length > 0) {
+                var p = root.pendingIsos
+                root.pendingIsos = []
+                installer.identify(p)
+            }
         }
     }
 
@@ -74,214 +109,274 @@ ScrollView {
         onAccepted: {
             var paths = []
             for (var i = 0; i < selectedFiles.length; ++i) paths.push(lanzador.rutaDesdeUrl(selectedFiles[i]))
-            installer.identify(paths)
+            root.pickIsos(paths)
         }
+    }
+
+    // one numbered step: a title line with a status mark, a description and its controls
+    component Paso: ColumnLayout {
+        id: paso
+        property int numero: 1
+        property string titulo
+        property string descripcion
+        property bool hecho: false
+        property bool activo: true
+        default property alias contenido: cuerpo.data
+        Layout.fillWidth: true
+        spacing: 8
+        opacity: activo ? 1.0 : 0.55
+        RowLayout {
+            spacing: 12
+            Rectangle {
+                width: 30; height: 30; radius: 15
+                color: paso.hecho ? Tema.bien : "transparent"
+                border.color: paso.hecho ? Tema.bien : Tema.oro
+                border.width: 2
+                Text {
+                    anchors.centerIn: parent
+                    text: paso.hecho ? "✔" : paso.numero
+                    color: paso.hecho ? Tema.fondo : Tema.oro
+                    font.pixelSize: 14; font.weight: Font.Bold
+                }
+            }
+            Text { text: paso.titulo; color: Tema.oroClaro; font.pixelSize: 17; font.weight: Font.Medium; Layout.fillWidth: true }
+        }
+        Text {
+            visible: paso.descripcion.length > 0
+            Layout.fillWidth: true
+            Layout.leftMargin: 42
+            wrapMode: Text.WordWrap
+            color: Tema.textoSuave
+            font.pixelSize: 13
+            text: paso.descripcion
+        }
+        ColumnLayout { id: cuerpo; Layout.fillWidth: true; Layout.leftMargin: 42; spacing: 8 }
     }
 
     ColumnLayout {
         width: root.availableWidth
-        spacing: 18
+        spacing: 22
 
-        // ---------------------------------------------------------------- requirements
-        Text { text: Tema.t("instRequirements"); color: Tema.oroClaro; font.pixelSize: 16; font.weight: Font.Medium }
-        Repeater {
-            model: [
-                { key: "buildTools", label: Tema.t("instBuildTools") },
-                { key: "git", label: "Git" },
-                { key: "python", label: "Python 3" }
-            ]
-            delegate: RowLayout {
-                required property var modelData
-                Layout.fillWidth: true
-                spacing: 10
-                Text {
-                    text: (root.env[modelData.key] ? "✔  " : "✖  ") + modelData.label
-                    color: root.env[modelData.key] ? Tema.bien : Tema.mal
-                    font.pixelSize: 14
-                    Layout.fillWidth: true
-                }
-                BotonSecundario {
-                    visible: !root.env[modelData.key]
-                    text: Tema.t("instDownload")
-                    onClicked: installer.openRequirementPage(modelData.key)
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------- runtime
-        Text { text: Tema.t("instRuntime"); color: Tema.oroClaro; font.pixelSize: 16; font.weight: Font.Medium }
         Text {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             color: Tema.textoSuave
             font.pixelSize: 13
-            text: Tema.t("instRuntimeDesc")
+            text: Tema.t("instIntro")
         }
-        RowLayout {
-            Layout.fillWidth: true
-            Text {
-                text: root.env.runtime ? "✔  " + Tema.t("instRuntimeOk") : "✖  " + Tema.t("instRuntimeMissing")
-                color: root.env.runtime ? Tema.bien : Tema.aviso
-                font.pixelSize: 14
-                Layout.fillWidth: true
-            }
+
+        // ---------------------------------------------------------------- 1. tools
+        Paso {
+            numero: 1
+            titulo: Tema.t("instToolsTitle")
+            descripcion: root.env.tools ? Tema.t("instToolsOk") : Tema.t("instToolsDesc")
+            hecho: root.env.tools
             BotonSecundario {
-                text: root.env.runtime ? Tema.t("instRuntimeUpdate") : Tema.t("instRuntimeGet")
-                enabled: !installer.running && root.env.git
-                onClicked: { root.log = []; installer.run("fetch", {}) }
+                visible: !root.env.tools
+                text: Tema.t("instToolsGet")
+                enabled: !installer.running
+                onClicked: root.maintenance("tools")
             }
         }
 
-        // ---------------------------------------------------------------- discs
-        Text { text: Tema.t("instDiscs"); color: Tema.oroClaro; font.pixelSize: 16; font.weight: Font.Medium }
-        Text {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            color: Tema.textoSuave
-            font.pixelSize: 13
-            text: Tema.t("instDiscsDesc")
-        }
-        Repeater {
-            model: root.discs
-            delegate: ColumnLayout {
-                required property var modelData
-                Layout.fillWidth: true
-                spacing: 2
-                Text {
-                    text: (modelData.compatible ? "✔  " : "✖  ") + (modelData.label || modelData.path)
-                    color: modelData.compatible ? Tema.bien : Tema.mal
-                    font.pixelSize: 14
-                }
-                Text {
-                    text: modelData.path + (modelData.problems && modelData.problems.length ? " — " + modelData.problems.join("; ") : "")
-                    color: Tema.textoTenue
-                    font.pixelSize: 12
-                    elide: Text.ElideMiddle
+        // ---------------------------------------------------------------- 2. ISO
+        Paso {
+            numero: 2
+            titulo: Tema.t("instIsoTitle")
+            descripcion: Tema.t("instDiscsDesc")
+            hecho: root.compatibleIsos().length > 0 || root.languages.length > 0
+            Repeater {
+                model: root.discs
+                delegate: ColumnLayout {
+                    required property var modelData
                     Layout.fillWidth: true
+                    spacing: 2
+                    Text {
+                        text: (modelData.compatible ? "✔  " : "✖  ") + (modelData.label || modelData.path)
+                        color: modelData.compatible ? Tema.bien : Tema.mal
+                        font.pixelSize: 14
+                    }
+                    Text {
+                        text: modelData.path + (modelData.problems && modelData.problems.length ? " — " + modelData.problems.join("; ") : "")
+                        color: Tema.textoTenue
+                        font.pixelSize: 12
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                    }
                 }
             }
-        }
-        Repeater {
-            model: root.languages
-            delegate: Text {
-                required property var modelData
-                text: "●  " + modelData.label + "  (" + Tema.t("instQuality_" + modelData.quality) + ")"
-                color: Tema.texto
-                font.pixelSize: 13
-            }
-        }
-        RowLayout {
-            spacing: 10
-            BotonSecundario { text: Tema.t("instAddIso"); enabled: !installer.running; onClicked: isoDialog.open() }
-            BotonSecundario {
-                text: Tema.t("instClearIso")
-                visible: root.discs.length > 0
-                enabled: !installer.running
-                onClicked: root.discs = []
-            }
-        }
-
-        // ---------------------------------------------------------------- build
-        Text { text: Tema.t("instBuild"); color: Tema.oroClaro; font.pixelSize: 16; font.weight: Font.Medium }
-        Fila {
-            titulo: Tema.t("instOptimize")
-            descripcion: Tema.t("instOptimizeDesc")
-            Interruptor { checked: root.optimize; onToggled: root.optimize = checked }
-        }
-        RowLayout {
-            spacing: 10
-            BotonSecundario {
-                text: root.env.game ? Tema.t("instRebuildAll") : Tema.t("instInstall")
-                enabled: !installer.running && root.env.buildTools && root.env.git && root.env.python
-                         && (root.compatibleIsos().length > 0 || root.languages.length > 0)
-                onClicked: root.startBuild(true)
-            }
-            BotonSecundario {
-                text: Tema.t("instQuick")
-                visible: root.env.game
-                enabled: !installer.running
-                onClicked: root.startBuild(false)
-            }
-            BotonSecundario {
-                text: Tema.t("instNative")
-                visible: root.env.game
-                enabled: !installer.running
-                onClicked: { root.log = []; installer.run("native", { config: "Release" }) }
-            }
-            BotonSecundario {
-                text: Tema.t("instCancel")
-                peligro: true
-                visible: installer.running
-                onClicked: installer.cancel()
-            }
-        }
-        Text {
-            visible: root.step.length > 0
-            text: root.step + (root.total > 0 ? "  —  " + Math.round(100 * root.done / root.total) + "%" : "")
-                  + (root.status.length > 0 ? "  —  " + root.status : "")
-            color: Tema.texto
-            font.pixelSize: 14
-        }
-        Rectangle {
-            id: trilho
-            visible: installer.running || root.total > 0
-            Layout.fillWidth: true
-            height: 8
-            radius: 4
-            color: Tema.campo
-            border.color: Tema.borde
-            clip: true
-            // Step with a count: the bar grows from the left edge.
-            Rectangle {
-                visible: root.total > 0
-                x: 0
-                width: root.total > 0 ? trilho.width * Math.min(1, root.done / root.total) : 0
-                height: parent.height
-                radius: 4
-                color: Tema.oro
-                Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
-            }
-            // Step without a count yet: a block sweeping back and forth (its own item, so the bar above always
-            // starts at the left edge once the percentages arrive).
-            Rectangle {
-                id: varredura
-                visible: installer.running && root.total === 0
-                width: trilho.width * 0.25
-                height: parent.height
-                radius: 4
-                color: Tema.oro
-                opacity: 0.8
-                SequentialAnimation on x {
-                    running: varredura.visible
-                    loops: Animation.Infinite
-                    NumberAnimation { from: 0; to: trilho.width - varredura.width; duration: 1200; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: trilho.width - varredura.width; to: 0; duration: 1200; easing.type: Easing.InOutSine }
-                }
-            }
-        }
-        Rectangle {
-            visible: root.log.length > 0
-            Layout.fillWidth: true
-            Layout.preferredHeight: 180
-            color: Tema.campo
-            border.color: Tema.borde
-            radius: 4
-            ListView {
-                id: logView
-                anchors.fill: parent
-                anchors.margins: 8
-                clip: true
-                model: root.log
-                onCountChanged: positionViewAtEnd()
+            Repeater {
+                model: root.discs.length === 0 ? root.languages : []
                 delegate: Text {
                     required property var modelData
-                    width: logView.width
-                    text: modelData
-                    color: Tema.textoSuave
-                    font.family: "Consolas"
-                    font.pixelSize: 12
-                    wrapMode: Text.WrapAnywhere
+                    text: "●  " + modelData.label + "  (" + Tema.t("instQuality_" + modelData.quality) + ")"
+                    color: Tema.texto
+                    font.pixelSize: 13
                 }
+            }
+            Text {
+                visible: root.pendingIsos.length > 0
+                text: Tema.t("instIsoWaitTools")
+                color: Tema.aviso
+                font.pixelSize: 13
+            }
+            RowLayout {
+                spacing: 10
+                BotonSecundario { text: Tema.t("instAddIso"); enabled: !installer.running; onClicked: isoDialog.open() }
+                BotonSecundario {
+                    text: Tema.t("instClearIso")
+                    visible: root.discs.length > 0
+                    enabled: !installer.running
+                    onClicked: root.discs = []
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- 3. install
+        Paso {
+            numero: 3
+            titulo: root.env.game ? Tema.t("instGameReady") : Tema.t("instInstallTitle")
+            descripcion: root.env.game ? Tema.t("instGameReadyDesc") : Tema.t("instInstallDesc")
+            hecho: root.env.game && !installer.running
+            activo: root.canInstall || installer.running || root.env.game
+            Fila {
+                titulo: Tema.t("instFirstPlay")
+                descripcion: Tema.t("instFirstPlayDesc")
+                Interruptor { checked: root.prepareFirstPlay; onToggled: root.prepareFirstPlay = checked }
+            }
+            RowLayout {
+                spacing: 10
+                BotonSecundario {
+                    text: root.env.game ? Tema.t("instRebuildAll") : Tema.t("instInstall")
+                    enabled: root.canInstall
+                    onClicked: root.install()
+                }
+                BotonSecundario {
+                    text: Tema.t("instCancel")
+                    peligro: true
+                    visible: installer.running
+                    onClicked: installer.cancel()
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- progress
+        ColumnLayout {
+            visible: installer.running || root.step.length > 0
+            Layout.fillWidth: true
+            spacing: 6
+            Text {
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+                text: (installer.running ? root.stepLabel(root.step) : root.step)
+                      + (installer.running && root.total > 0 ? "  —  " + Math.round(100 * root.done / root.total) + "%" : "")
+                color: root.lastOk ? Tema.texto : Tema.mal
+                font.pixelSize: 15
+                font.weight: Font.Medium
+            }
+            Text {
+                visible: installer.running && root.status.length > 0
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+                text: root.status
+                color: Tema.textoSuave
+                font.pixelSize: 12
+            }
+            Rectangle {
+                id: trilho
+                Layout.fillWidth: true
+                height: 8
+                radius: 4
+                color: Tema.campo
+                border.color: Tema.borde
+                clip: true
+                // a step with a count: the bar grows from the left edge
+                Rectangle {
+                    visible: root.total > 0
+                    x: 0
+                    width: root.total > 0 ? trilho.width * Math.min(1, root.done / root.total) : 0
+                    height: parent.height
+                    radius: 4
+                    color: Tema.oro
+                    Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                }
+                // a step without a count yet: a block sweeping back and forth
+                Rectangle {
+                    id: varredura
+                    visible: installer.running && root.total === 0
+                    width: trilho.width * 0.25
+                    height: parent.height
+                    radius: 4
+                    color: Tema.oro
+                    opacity: 0.8
+                    SequentialAnimation on x {
+                        running: varredura.visible
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 0; to: trilho.width - varredura.width; duration: 1200; easing.type: Easing.InOutSine }
+                        NumberAnimation { from: trilho.width - varredura.width; to: 0; duration: 1200; easing.type: Easing.InOutSine }
+                    }
+                }
+            }
+            BotonSecundario {
+                text: root.showLog ? Tema.t("instHideLog") : Tema.t("instShowLog")
+                visible: root.log.length > 0
+                onClicked: root.showLog = !root.showLog
+            }
+            Rectangle {
+                visible: root.showLog && root.log.length > 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: 200
+                color: Tema.campo
+                border.color: Tema.borde
+                radius: 4
+                ListView {
+                    id: logView
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    clip: true
+                    model: root.log
+                    onCountChanged: positionViewAtEnd()
+                    delegate: Text {
+                        required property var modelData
+                        width: logView.width
+                        text: modelData
+                        color: Tema.textoSuave
+                        font.family: "Consolas"
+                        font.pixelSize: 12
+                        wrapMode: Text.WrapAnywhere
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- maintenance (folded)
+        BotonSecundario {
+            text: (root.showMore ? "▾  " : "▸  ") + Tema.t("instMore")
+            onClicked: root.showMore = !root.showMore
+        }
+        ColumnLayout {
+            visible: root.showMore
+            Layout.fillWidth: true
+            spacing: 10
+            Fila {
+                titulo: Tema.t("instNative")
+                descripcion: Tema.t("instNativeDesc")
+                BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("native") }
+            }
+            Fila {
+                titulo: Tema.t("instQuick")
+                descripcion: Tema.t("instQuickDesc")
+                BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("sync,build") }
+            }
+            Fila {
+                titulo: Tema.t("instPgo")
+                descripcion: Tema.t("instPgoDesc")
+                BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("pgo") }
+            }
+            Fila {
+                titulo: Tema.t("instRuntime")
+                descripcion: root.env.runtime ? Tema.t("instRuntimeOk") : Tema.t("instRuntimeMissing")
+                BotonSecundario { text: Tema.t("instRuntimeUpdate"); enabled: !installer.running; onClicked: root.maintenance("tools,fetch") }
             }
         }
         Item { Layout.preferredHeight: 12 }

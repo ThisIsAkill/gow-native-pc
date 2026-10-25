@@ -172,6 +172,9 @@ ApplicationWindow {
     function jugar() {
         refrescarInstalacion()
         if (!listo) { aviso(Tema.t("instNotReady")); ventana.pagina = 1; return }
+        // gow-native-pc: without the first-play preparation the vector-unit code still runs interpreted: say so instead of
+        // letting the first minutes look frozen
+        if (!installer.firstPlayPrepared()) aviso(Tema.t("firstPlayNotice"))
         var elegido = idiomaJuego(ajustes.textoJuego)
         if (!elegido) {
             if (idiomasJuego.length > 1) { preguntaIdioma.open(); return }

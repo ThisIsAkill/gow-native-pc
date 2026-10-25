@@ -1,5 +1,7 @@
 # The build pipeline: from disc images to a native PC game, driven by a game profile (games/<id>/game.toml).
 # The launcher's Install tab runs it; build.cmd runs it from a terminal. Stages (run in this order, any subset):
+#   tools      the build tools into data/_tools (portable Git, Python, CMake, Ninja and the clang compiler, each
+#              downloaded once and checked against its SHA-256); every other stage also fetches what it needs
 #   fetch      engine/runtime: clone engine/runtime.toml's repository at its commit, apply engine/patches/*.patch
 #   discs      -Discs "<iso>|<iso>": tools/disc/prepare.py -> data/<game>/discs/*, languages.json, one memory card
 #   configure  CMake + Ninja in -BuildRoot (a short path: the runtime's dependencies exceed MAX_PATH in long folders),
@@ -56,21 +58,50 @@ function Native($exe, [string[]]$a, $what) {
 }
 
 # --- tools -----------------------------------------------------------------------------------------------------------
-# a Python 3 that really runs: the Microsoft Store's python.exe stub (WindowsApps) is a command but not a Python
-$python = $null
-$stub = $false
-foreach ($name in 'python', 'py') {
-    $cmd = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $cmd) { continue }
-    & $cmd.Source -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' *> $null
-    if ($LASTEXITCODE -eq 0) { $python = $cmd.Source; break }
-    if ($cmd.Source -like '*\WindowsApps\*') { $stub = $true }
+# Portable copies in data\_tools, used instead of whatever the machine has installed (no installer, no admin rights, no
+# PATH changes; an old system Python without tomllib or a Microsoft Store stub cannot get in the way). Each is downloaded
+# once from its official release and checked against the SHA-256 published there.
+$toolsDir = Join-Path $root 'data\_tools'
+$portable = @{
+    git    = @{ url = 'https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip'
+                sha = 'da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be'; dir = 'mingit'; exe = 'cmd\git.exe'; mb = 40 }
+    python = @{ url = 'https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip'
+                sha = '97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297'; dir = 'python'; exe = 'python.exe'; mb = 11 }
+    cmake  = @{ url = 'https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-windows-x86_64.zip'
+                sha = '0c4baa40f28b3f8225eb3fdf6946c987b4fe901403b4eaf2fbbd9378100aaa0c'; dir = 'cmake'; exe = 'cmake-3.31.12-windows-x86_64\bin\cmake.exe'; mb = 52 }
+    ninja  = @{ url = 'https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip'
+                sha = '07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65'; dir = 'ninja'; exe = 'ninja.exe'; mb = 1 }
 }
-if (-not $python) {
-    if ($stub) { throw 'Python 3 not found: "python" is the Microsoft Store shortcut. Install Python from python.org (tick "Add python.exe to PATH") or turn off the python.exe App execution alias in Windows Settings' }
-    throw 'Python 3 not found: install it from python.org and tick "Add python.exe to PATH" (a new terminal or launcher start is needed afterwards)'
+function Get-PortableTool([string]$name) {
+    $t = $portable[$name]
+    $dest = Join-Path $toolsDir $t.dir
+    $exe = Join-Path $dest $t.exe
+    if (Test-Path $exe) { return $exe }
+    New-Item -ItemType Directory -Force $toolsDir | Out-Null
+    $zip = Join-Path $toolsDir ([IO.Path]::GetFileName($t.url))
+    if (-not (Test-Path $zip) -or (Get-FileHash $zip -Algorithm SHA256).Hash -ne $t.sha) {
+        Write-Host "@@status downloading $name (about $($t.mb) MB, once)"
+        Write-Host "downloading $name : $($t.url)"
+        $ProgressPreference = 'SilentlyContinue'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -UseBasicParsing $t.url -OutFile $zip
+        if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $t.sha) { Remove-Item $zip; throw "$name download: unexpected SHA-256 (try again)" }
+    }
+    Write-Host "@@status unpacking $name"
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    Expand-Archive -Path $zip -DestinationPath $dest -Force
+    Remove-Item $zip
+    # the embeddable Python's ._pth file would keep each script's own folder off sys.path
+    if ($name -eq 'python') { Get-ChildItem $dest -Filter '*._pth' | Remove-Item }
+    if (-not (Test-Path $exe)) { throw "$name : $exe missing after unpacking" }
+    return $exe
 }
-$git = (Get-Command git -ErrorAction SilentlyContinue).Source
+$python = Get-PortableTool 'python'
+$git = Get-PortableTool 'git'
+$cmakeExe = Get-PortableTool 'cmake'
+$ninjaExe = Get-PortableTool 'ninja'
+# Git for CMake's dependency downloads (FetchContent), CMake and Ninja for every build
+$env:PATH = (@((Split-Path $git), (Split-Path $cmakeExe), (Split-Path $ninjaExe)) -join ';') + ';' + $env:PATH
 $profileJson = & $python -I (Join-Path $root 'tools\pipeline\profile.py') $Game
 if ($LASTEXITCODE -ne 0) { throw "no game profile '$Game' (games\$Game\game.toml)" }
 $prof = $profileJson | Out-String | ConvertFrom-Json
@@ -137,8 +168,8 @@ function Use-Msvc {
     cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { Set-Item "env:$($Matches[1])" $Matches[2] } }
     foreach ($c in @('cl', 'cmake', 'ninja')) { if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { throw "$c not found after vcvars64.bat" } }
 }
-# llvm-mingw (clang for Windows with its own headers and libraries; Visual Studio is not used) downloaded once, plus
-# CMake and Ninja: from PATH or the Build Tools when present, otherwise from pip
+# llvm-mingw (clang for Windows with its own headers and libraries; Visual Studio is not used) downloaded once (CMake and
+# Ninja: the portable tools above)
 $llvmVersion = 'llvm-mingw-20261020-ucrt-x86_64'
 $llvmSha256 = 'fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd'
 function Use-Clang {
@@ -149,7 +180,8 @@ function Use-Clang {
         $zip = Join-Path $tools "$llvmVersion.zip"
         New-Item -ItemType Directory -Force $tools | Out-Null
         if (-not (Test-Path $zip) -or (Get-FileHash $zip -Algorithm SHA256).Hash -ne $llvmSha256) {
-            Write-Host "downloading $llvmVersion (about 170 MB, once)"
+            Write-Host "@@status downloading the clang compiler (about 170 MB, once)"
+        Write-Host "downloading $llvmVersion (about 170 MB, once)"
             $ProgressPreference = 'SilentlyContinue'
             Invoke-WebRequest -UseBasicParsing "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/$llvmVersion.zip" -OutFile $zip
             if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $llvmSha256) { Remove-Item $zip; throw "$llvmVersion.zip: unexpected SHA-256" }
@@ -158,18 +190,6 @@ function Use-Clang {
         Expand-Archive -Path $zip -DestinationPath $tools -Force
     }
     $paths = @(Join-Path $llvm 'bin')
-    foreach ($c in 'cmake', 'ninja') {
-        if (Get-Command $c -ErrorAction SilentlyContinue) { continue }
-        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-        $vs = if (Test-Path $vswhere) { & $vswhere -latest -products * -property installationPath } else { $null }
-        $ext = if ($vs) { Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake' } else { '' }
-        $cand = if ($c -eq 'cmake') { Join-Path $ext 'CMake\bin\cmake.exe' } else { Join-Path $ext 'Ninja\ninja.exe' }
-        if ($vs -and (Test-Path $cand)) { $paths += Split-Path $cand }
-        else {
-            Native $python @('-m', 'pip', 'install', '--user', '--quiet', $c) "pip install $c"
-            $paths += "$(& $python -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))")".Trim()
-        }
-    }
     # the MSVC environment (INCLUDE, LIB) must not leak into the mingw target
     foreach ($v in 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR') { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
     $env:PATH = ($paths -join ';') + ';' + $env:PATH
@@ -181,6 +201,13 @@ function Languages {
     $f = Join-Path $data 'languages.json'
     if (-not (Test-Path $f)) { throw 'no prepared disc: run the "discs" stage with your ISO' }
     return Get-Content $f -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+# --- tools: everything above already ran; the stage also fetches the compiler ----------------------------------------
+if ($Stages -contains 'tools') {
+    Step 'build tools'
+    if ($Toolchain -eq 'clang') { Use-Clang }
+    Write-Host "OK: Git, Python, CMake, Ninja$(if ($Toolchain -eq 'clang') { ', clang' }) in $toolsDir"
 }
 
 # --- fetch: the runtime -------------------------------------------------------------------------------------------
@@ -280,9 +307,10 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto') {
             Write-Host "profile-guided: $pgoProfile"
             $flags += " -fprofile-instr-use=$(Barra $pgoProfile) -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
         }
-        $extra += @('-DCMAKE_C_COMPILER=clang', '-DCMAKE_CXX_COMPILER=clang++', '-DCMAKE_RC_COMPILER=llvm-rc',
+        $extra += @('-DCMAKE_C_COMPILER=clang', '-DCMAKE_CXX_COMPILER=clang++', '-DCMAKE_RC_COMPILER=llvm-rc', "-DCMAKE_MAKE_PROGRAM=$(Barra $ninjaExe)",
             "-DCMAKE_C_FLAGS=$flags", "-DCMAKE_CXX_FLAGS=$flags", "-DCMAKE_EXE_LINKER_FLAGS=$link")
     }
+    $extra += "-DPython3_EXECUTABLE=$(Barra $python)"
     Native 'cmake' (@('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
@@ -411,8 +439,11 @@ if ($Stages -contains 'optimize') {
     Need $runnerExe 'built game (run the build stage)'
     $elf = (Languages).recompile_elf
     New-Item -ItemType Directory -Force $vu1, $iopMods | Out-Null
+    # the hardware renderer as the player has it: with PS2X_GS_SHADER_CACHE_DIR (the launcher passes its own) the shaders
+    # compiled here are already in the cache at the first play
     $vars = @{ GOW_VU1_CAPTURA = $vu1; PS2X_IOP_DUMP_MODULES = $iopMods; GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_AUDIO = '0'
-               GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; GOW_PAD_GUION = $prof.optimize.pad_script }
+               GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'
+               GOW_PAD_GUION = $prof.optimize.pad_script }
     foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
     # nothing left from the build (mspdbsrv, vctip, a stray cl.exe) may compete with the game for the 4 minutes
     Get-Process -Name mspdbsrv, vctip, cl, link -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -444,10 +475,13 @@ if ($Stages -contains 'launcher') {
         ForEach-Object { Get-ChildItem $_.FullName -Directory -Filter 'msvc*_64' } | Select-Object -First 1 -ExpandProperty FullName
     if (-not $qt) {
         Write-Host "downloading Qt $qtVersion (aqtinstall, about 1 GB, once)"
+        # developers only: the portable Python has no pip, aqtinstall needs a full Python (python.org)
+        $sysPython = (Get-Command python -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1).Source
+        if (-not $sysPython) { throw 'building the launcher needs Qt 6: install Python from python.org (for aqtinstall) or Qt in C:\Qt' }
         New-Item -ItemType Directory -Force $qtDir | Out-Null
-        Native $python @('-m', 'pip', 'install', '--user', '--quiet', '--upgrade', 'aqtinstall') 'pip install aqtinstall'
+        Native $sysPython @('-m', 'pip', 'install', '--user', '--quiet', '--upgrade', 'aqtinstall') 'pip install aqtinstall'
         Push-Location $qtDir
-        try { Native $python @('-m', 'aqt', 'install-qt', 'windows', 'desktop', $qtVersion, 'win64_msvc2022_64', '-O', $qtDir) 'Qt download' }
+        try { Native $sysPython @('-m', 'aqt', 'install-qt', 'windows', 'desktop', $qtVersion, 'win64_msvc2022_64', '-O', $qtDir) 'Qt download' }
         finally { Pop-Location }
         $qt = Join-Path $qtDir "$qtVersion\msvc2022_64"
     }

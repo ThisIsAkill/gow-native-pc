@@ -56,12 +56,36 @@ namespace
     }
 }
 
+// build.ps1's compiler for this copy (data/toolchain.txt; clang when nothing was built yet)
+static QString toolchainOf(const QString &root)
+{
+    QFile file(root + QStringLiteral("/data/toolchain.txt"));
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(file.readAll()).trimmed() == QStringLiteral("msvc"))
+        return QStringLiteral("msvc");
+    return QStringLiteral("clang");
+}
+
 InstallerBackend::InstallerBackend(QObject *parent) : QObject(parent), m_root(findRoot()) {}
 
+// the portable Python of the build tools (data/_tools, build.ps1 stage "tools"), else a system one
 QString InstallerBackend::python() const
 {
+    const QString portable = m_root + QStringLiteral("/data/_tools/python/python.exe");
+    if (QFileInfo::exists(portable))
+        return portable;
     const QString found = workingPython();
     return found.isEmpty() ? QStringLiteral("python") : found;
+}
+
+// every build tool build.ps1 downloads into data/_tools (see its "tools" stage): Git, Python, CMake, Ninja, and the clang
+// compiler unless this copy builds with MSVC
+bool InstallerBackend::toolsReady() const
+{
+    const QString t = m_root + QStringLiteral("/data/_tools/");
+    for (const char *exe : {"mingit/cmd/git.exe", "python/python.exe", "cmake/cmake-3.31.12-windows-x86_64/bin/cmake.exe", "ninja/ninja.exe"})
+        if (!QFileInfo::exists(t + QLatin1String(exe)))
+            return false;
+    return toolchainOf(m_root) == QStringLiteral("msvc") || QFileInfo::exists(t + QStringLiteral("llvm-mingw-20261020-ucrt-x86_64/bin/clang++.exe"));
 }
 
 // the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders), chosen
@@ -79,15 +103,6 @@ QString InstallerBackend::buildRoot() const
     return QStringLiteral("C:/gow-build");
 }
 
-// build.ps1's compiler for this copy (data/toolchain.txt; clang when nothing was built yet)
-static QString toolchainOf(const QString &root)
-{
-    QFile file(root + QStringLiteral("/data/toolchain.txt"));
-    if (file.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(file.readAll()).trimmed() == QStringLiteral("msvc"))
-        return QStringLiteral("msvc");
-    return QStringLiteral("clang");
-}
-
 QString InstallerBackend::runnerPath() const
 {
     // clang builds go to <build root>-clang (build.ps1)
@@ -103,9 +118,8 @@ QVariantMap InstallerBackend::environment() const
     const QString vswhere = qEnvironmentVariable("ProgramFiles(x86)") + QStringLiteral("/Microsoft Visual Studio/Installer/vswhere.exe");
     const QString runtimeDir = m_root + QStringLiteral("/engine/runtime");
     return {
-        {QStringLiteral("git"), onPath(QStringLiteral("git"))},
-        {QStringLiteral("python"), !workingPython().isEmpty()},
-        // clang (llvm-mingw) is downloaded by the first build; only a copy switched to MSVC needs the Build Tools
+        // the build tools are downloaded by the pipeline (stage "tools"); only a copy switched to MSVC needs the Build Tools
+        {QStringLiteral("tools"), toolsReady()},
         {QStringLiteral("buildTools"), toolchainOf(m_root) == QStringLiteral("clang") || QFileInfo::exists(vswhere)},
         {QStringLiteral("runtime"), QFileInfo::exists(runtimeDir + QStringLiteral("/PS2Recomp/CMakeLists.txt"))},
         {QStringLiteral("game"), !runnerPath().isEmpty()},
@@ -127,6 +141,11 @@ QVariantList InstallerBackend::languages() const
         if (QFileInfo::exists(v.toObject().value(QStringLiteral("elf")).toString()))
             out << v.toObject().toVariantMap();
     return out;
+}
+
+bool InstallerBackend::firstPlayPrepared() const
+{
+    return QFileInfo::exists(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/native.stamp"));
 }
 
 QString InstallerBackend::recompileElf() const
@@ -169,6 +188,12 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
     m_process = new QProcess(this);
     m_process->setProgram(QStringLiteral("powershell.exe"));
     m_process->setArguments(args);
+    // the first-play preparation (optimize stage) fills the same shader cache the game uses when started from here
+    // (Lanzador: CacheLocation/sombreadores)
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"),
+                       QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/sombreadores"));
+    m_process->setProcessEnvironment(environment);
     m_process->setWorkingDirectory(m_root);
     m_process->setProcessChannelMode(QProcess::MergedChannels);
     connect(m_process, &QProcess::readyReadStandardOutput, this, &InstallerBackend::readOutput);

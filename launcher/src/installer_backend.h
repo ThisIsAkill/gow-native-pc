@@ -30,12 +30,14 @@ public:
     QString gameId() const { return m_game; }
     bool running() const { return m_process != nullptr; }
 
-    // {git, python, buildTools, runtime, game, launcherOk: bool; runtimeDir, runner, dataDir: string}
+    // {tools, buildTools, runtime, game, discs: bool; runtimeDir, runner, dataDir: string}
     Q_INVOKABLE QVariantMap environment() const;
     // the compiled game (empty when not built yet)
     Q_INVOKABLE QString runnerPath() const;
     // data/<game>/languages.json: [{language, label, edition, quality, elf}]
     Q_INVOKABLE QVariantList languages() const;
+    // the recorded VU1 code was compiled in (optimize / native stage ran): the first play does not stutter
+    Q_INVOKABLE bool firstPlayPrepared() const;
     // the executable recompiled by the pipeline (empty when no disc was prepared)
     Q_INVOKABLE QString recompileElf() const;
     // identifies disc images (tools/disc/identify.py) in the background -> identified(list)
@@ -58,6 +60,7 @@ signals:
 
 private:
     QString python() const;
+    bool toolsReady() const;
     QString buildRoot() const;
     void readOutput();
 
