@@ -103,13 +103,39 @@ if ($Stages -contains 'fetch') {
         Native $git @('-C', $rt, 'fetch', '--quiet', 'origin') 'git fetch'
         Native $git @('-C', $rt, 'checkout', '--quiet', $runtimeCommit) 'git checkout'
     }
-    foreach ($patch in Get-ChildItem (Join-Path $root 'engine\patches\*.patch') | Sort-Object Name) {
-        $ErrorActionPreference = 'Continue'
-        & $git -C $rt apply --check --reverse $patch.FullName 2>$null
-        $applied = $LASTEXITCODE -eq 0
+    # Which patches are in? Patches can touch the same file (01 and 07: ReleaseMode.cmake), so a per-patch reverse check
+    # fails once a later one is in. Instead, in a temporary index (the files are not touched): the tree after 0..N
+    # patches on the pinned commit, and the tree of the files as they are; the matching prefix tells what is left.
+    $patches = @(Get-ChildItem (Join-Path $root 'engine\patches\*.patch') | Sort-Object Name)
+    $index = Join-Path $env:TEMP "gow-patch-index-$PID"
+    $oldIndex = $env:GIT_INDEX_FILE
+    $ErrorActionPreference = 'Continue'
+    try {
+        $env:GIT_INDEX_FILE = $index
+        & $git -C $rt read-tree HEAD
+        $trees = @("$(& $git -C $rt write-tree)".Trim())
+        foreach ($patch in $patches) {
+            & $git -C $rt apply --cached $patch.FullName 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "patch $($patch.Name) does not apply to runtime commit $runtimeCommit" }
+            $trees += "$(& $git -C $rt write-tree)".Trim()
+        }
+        $touched = @(& $git -C $rt diff --name-only HEAD $trees[-1])
+        & $git -C $rt read-tree HEAD
+        & $git -C $rt add -u 2>$null
+        if ($touched.Count) { & $git -C $rt add -A -- $touched 2>$null }
+        $current = "$(& $git -C $rt write-tree)".Trim()
+    }
+    finally {
+        $env:GIT_INDEX_FILE = $oldIndex
+        Remove-Item $index -Force -ErrorAction SilentlyContinue
         $ErrorActionPreference = 'Stop'
-        if ($applied) { Write-Host "patch $($patch.Name): applied" }
-        else { Native $git @('-C', $rt, 'apply', $patch.FullName) "patch $($patch.Name)"; Write-Host "patch $($patch.Name): applied now" }
+    }
+    $done = [array]::IndexOf($trees, $current)
+    if ($done -lt 0) { throw 'engine\runtime has changes that are not engine\patches: delete the engine\runtime folder and run again' }
+    for ($i = 0; $i -lt $patches.Count; $i++) {
+        if ($i -lt $done) { Write-Host "patch $($patches[$i].Name): applied"; continue }
+        Native $git @('-C', $rt, 'apply', $patches[$i].FullName) "patch $($patches[$i].Name)"
+        Write-Host "patch $($patches[$i].Name): applied now"
     }
 }
 
