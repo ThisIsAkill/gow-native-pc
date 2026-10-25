@@ -223,22 +223,39 @@ ScrollView {
             font.pixelSize: 14
         }
         Rectangle {
+            id: trilho
             visible: installer.running || root.total > 0
             Layout.fillWidth: true
             height: 8
             radius: 4
             color: Tema.campo
             border.color: Tema.borde
+            clip: true
+            // Step with a count: the bar grows from the left edge.
             Rectangle {
-                width: root.total > 0 ? parent.width * root.done / root.total : parent.width * 0.25
+                visible: root.total > 0
+                x: 0
+                width: root.total > 0 ? trilho.width * Math.min(1, root.done / root.total) : 0
                 height: parent.height
                 radius: 4
                 color: Tema.oro
+                Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+            }
+            // Step without a count yet: a block sweeping back and forth (its own item, so the bar above always
+            // starts at the left edge once the percentages arrive).
+            Rectangle {
+                id: varredura
+                visible: installer.running && root.total === 0
+                width: trilho.width * 0.25
+                height: parent.height
+                radius: 4
+                color: Tema.oro
+                opacity: 0.8
                 SequentialAnimation on x {
-                    running: installer.running && root.total === 0
+                    running: varredura.visible
                     loops: Animation.Infinite
-                    NumberAnimation { from: 0; to: root.width * 0.7; duration: 1200 }
-                    NumberAnimation { from: root.width * 0.7; to: 0; duration: 1200 }
+                    NumberAnimation { from: 0; to: trilho.width - varredura.width; duration: 1200; easing.type: Easing.InOutSine }
+                    NumberAnimation { from: trilho.width - varredura.width; to: 0; duration: 1200; easing.type: Easing.InOutSine }
                 }
             }
         }
