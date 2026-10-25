@@ -138,12 +138,15 @@ $buildRootFile = Join-Path $root 'data\build-root.txt'
 if (-not $BuildRoot -and (Test-Path $buildRootFile)) { $BuildRoot = (Get-Content $buildRootFile -Raw).Trim() }
 if (-not $BuildRoot) {
     $BuildRoot = 'C:\gow-build'
-    $cache = Join-Path $BuildRoot 'CMakeCache.txt'
-    if (Test-Path $cache) {
+    # every folder of the root (MSVC, clang, dev configuration) must be this copy's or unused
+    foreach ($folder in @($BuildRoot, "$BuildRoot-clang", "$BuildRoot-dev", "$BuildRoot-clang-pgogen")) {
+        $cache = Join-Path $folder 'CMakeCache.txt'
+        if (-not (Test-Path $cache)) { continue }
         $home_ = [regex]::Match((Get-Content $cache -Raw), '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Groups[1].Value.Trim()
         if (-not $home_.StartsWith((Barra $rt), [StringComparison]::OrdinalIgnoreCase)) {
             $md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
             $BuildRoot = 'C:\gow-build-' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+            break
         }
     }
     New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
