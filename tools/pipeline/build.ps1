@@ -17,7 +17,8 @@
 #   installer  the release setup (data/_package/gow-native-pc-setup.exe): installer/ built and packed with the package
 # Output protocol for the launcher: "=== <step> ===", "@@progress <done> <all>", "@@status <text>", other lines = log.
 # usage: powershell -ExecutionPolicy Bypass -File tools\pipeline\build.ps1 [-Game gow1] [-Stages fetch,discs,configure,
-#        recomp,sync,build] [-Discs "<iso>|<iso>"] [-Config Release|RelWithDebInfo] [-Ltcg] [-Pdb] [-BuildRoot C:\gow-build]
+#        recomp,sync,build] [-Discs "<iso>|<iso>"] [-Config Release|RelWithDebInfo] [-Ltcg] [-Pdb] [-BuildRoot <folder>]
+# -BuildRoot: default C:\gow-build (or C:\gow-build-<hash> when another copy uses it), kept in data\build-root.txt
 # -Pdb: Release with debug information (ps2EntryRunner.pdb) for profilers; the optimised code is the same
 param(
     [string]$Game = 'gow1',
@@ -26,7 +27,7 @@ param(
     [ValidateSet('Release', 'RelWithDebInfo')][string]$Config = 'Release',
     [switch]$Ltcg,
     [switch]$Pdb,
-    [string]$BuildRoot = 'C:\gow-build',
+    [string]$BuildRoot = '',
     [int]$Seconds = 0
 )
 $ErrorActionPreference = 'Stop'
@@ -62,7 +63,25 @@ $logs = Join-Path $data 'logs'
 $gen = Join-Path $data 'recomp'
 $vu1 = Join-Path $data 'vu1_capture'
 $iopMods = Join-Path $data 'iop_modules'
-$bld = if ($Config -eq 'Release') { $BuildRoot } else { "$BuildRoot-dev" }   # Ninja is single-config: one folder each
+# Build folder of this copy, remembered in data\build-root.txt (the launcher reads it too). C:\gow-build unless another
+# copy (a development checkout, a second installation) already configured it: CMake refuses a cache made from another
+# source folder, so this copy then takes C:\gow-build-<hash of its folder>.
+$buildRootFile = Join-Path $root 'data\build-root.txt'
+if (-not $BuildRoot -and (Test-Path $buildRootFile)) { $BuildRoot = (Get-Content $buildRootFile -Raw).Trim() }
+if (-not $BuildRoot) {
+    $BuildRoot = 'C:\gow-build'
+    $cache = Join-Path $BuildRoot 'CMakeCache.txt'
+    if (Test-Path $cache) {
+        $home_ = [regex]::Match((Get-Content $cache -Raw), '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Groups[1].Value.Trim()
+        if (-not $home_.StartsWith((Barra $rt), [StringComparison]::OrdinalIgnoreCase)) {
+            $md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
+            $BuildRoot = 'C:\gow-build-' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+        }
+    }
+    New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
+    [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
+}
+$bld =if ($Config -eq 'Release') { $BuildRoot } else { "$BuildRoot-dev" }   # Ninja is single-config: one folder each
 $runnerExe = Join-Path $bld 'ps2xRuntime\ps2EntryRunner.exe'
 New-Item -ItemType Directory -Force $data, $logs | Out-Null
 # long paths for git in this process only (the dependencies' checkouts); the user's git config is not changed

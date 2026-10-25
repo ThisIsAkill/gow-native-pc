@@ -43,9 +43,18 @@ QString InstallerBackend::python() const
     return QStringLiteral("py");
 }
 
-// the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders)
+// the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders), chosen
+// per copy by tools/pipeline/build.ps1 and kept in data/build-root.txt (C:\gow-build, or C:\gow-build-<hash> when
+// another copy already uses that one)
 QString InstallerBackend::buildRoot() const
 {
+    QFile file(m_root + QStringLiteral("/data/build-root.txt"));
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        const QString path = QString::fromUtf8(file.readAll()).trimmed();
+        if (!path.isEmpty())
+            return QDir::fromNativeSeparators(path);
+    }
     return QStringLiteral("C:/gow-build");
 }
 
@@ -113,8 +122,8 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
         return false;
     QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
                      QStringLiteral("-File"), m_root + QStringLiteral("/tools/pipeline/build.ps1"),
-                     QStringLiteral("-Game"), m_game, QStringLiteral("-Stages"), stages,
-                     QStringLiteral("-BuildRoot"), buildRoot()};
+                     QStringLiteral("-Game"), m_game, QStringLiteral("-Stages"), stages};
+    // no -BuildRoot: build.ps1 picks this copy's build folder and records it in data/build-root.txt
     const QStringList isos = options.value(QStringLiteral("isos")).toStringList();
     if (!isos.isEmpty())
         args << QStringLiteral("-Discs") << isos.join(QLatin1Char('|'));

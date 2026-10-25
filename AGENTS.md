@@ -30,14 +30,16 @@ launcher/                   Qt 6 launcher (from the Tobiichi Launcher). src/lanz
 installer/setup.cpp         release setup, Win32 + GDI+ (no Qt: one self-contained exe). Same exe packs (--pack <dir>
                             <out>, LZMS blocks appended + footer), installs per user (HKCU Apps entry, shortcuts,
                             uninstall.exe + uninstall.lst) and uninstalls. Tests without clicks: /S [/D=<dir>];
-                            uninstall.exe /uninstall-from <dir> /S [/purge] (purge removes C:\gow-build only when its
-                            CMakeCache points into <dir>); GOW_SETUP_CAPTURE=<png> screenshot
+                            uninstall.exe /uninstall-from <dir> /S [/purge] (purge removes the copy's build folder
+                            only when its CMakeCache points into <dir>); GOW_SETUP_CAPTURE=<png> screenshot
 data/                       generated, git-ignored: discs, languages.json, mc0, recomp output, vu1_capture,
                             iop_modules, logs, _tools/qt
 ```
 
 Build folder: `C:\gow-build` (Release) / `C:\gow-build-dev` (RelWithDebInfo). It must stay short: the runtime's CMake
-dependencies (git checkouts) exceed MAX_PATH under long paths.
+dependencies (git checkouts) exceed MAX_PATH under long paths. One folder per copy of this repository (CMake refuses a
+cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` when `C:\gow-build` belongs to another
+copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
 
 ## Contracts (do not break)
 

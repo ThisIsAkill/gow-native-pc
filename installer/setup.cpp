@@ -521,11 +521,20 @@ void removeWorker(std::wstring dir, bool keep)
         // data/ (discs, saves, recompiled code, VU1 recordings), the downloaded runtime and the build folders
         // (tools/pipeline/build.ps1) — a build folder only when its CMake cache belongs to this installation, so a
         // build made from another copy (a development checkout) is never touched
+        std::wstring build = L"C:\\gow-build"; // this copy's build folder: data\build-root.txt (build.ps1)
+        std::vector<uint8_t> chosen;
+        if (readAll(dir + L"\\data\\build-root.txt", chosen) && !chosen.empty())
+        {
+            std::wstring s(chosen.begin(), chosen.end()); // an ASCII path such as C:\gow-build-1a2b3c4d
+            s.erase(s.find_last_not_of(L" \r\n\t") + 1);
+            if (!s.empty())
+                build = s;
+        }
         fs::remove_all(dir + L"\\data", ec);
         fs::remove_all(dir + L"\\engine\\runtime", ec);
-        for (const wchar_t *build : {L"C:\\gow-build", L"C:\\gow-build-dev"})
-            if (buildBelongsTo(build, dir))
-                fs::remove_all(build, ec);
+        for (const std::wstring &folder : {build, build + L"-dev"})
+            if (buildBelongsTo(folder, dir))
+                fs::remove_all(folder, ec);
     }
     progress(900, L"");
     RemoveDirectoryW((dir + L"\\engine").c_str());
