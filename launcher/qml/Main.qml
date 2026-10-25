@@ -76,9 +76,21 @@ ApplicationWindow {
     readonly property var estadoDatos: lanzador.comprobarDatos(ajustes.elf, ajustes.iso)
     readonly property var estadoEjecutable: lanzador.comprobarEjecutable(ajustes.ejecutable)
     // gow-native-pc: ready = the game is built and at least one language's disc is prepared (Install tab)
+    // Plain values, not bindings: installer.languages() / runnerPath() are function calls QML evaluates once, so they
+    // are read again by refrescarInstalacion() when a build finishes and before playing.
     property var idiomasJuego: installer.languages()
-    readonly property string ejecutableJuego: installer.runnerPath()
+    property string ejecutableJuego: installer.runnerPath()
     readonly property bool listo: ejecutableJuego.length > 0 && idiomasJuego.length > 0
+    function refrescarInstalacion() {
+        idiomasJuego = installer.languages()
+        ejecutableJuego = installer.runnerPath()
+    }
+    Connections {
+        target: installer
+        function onFinished() { ventana.refrescarInstalacion() }
+    }
+    // also when the window comes back to the front (a build run from a terminal with build.cmd)
+    onActiveChanged: if (active && !installer.running) refrescarInstalacion()
     function idiomaJuego(codigo) {
         for (var i = 0; i < idiomasJuego.length; ++i)
             if (idiomasJuego[i].language === codigo) return idiomasJuego[i]
@@ -158,7 +170,7 @@ ApplicationWindow {
     }
 
     function jugar() {
-        idiomasJuego = installer.languages()
+        refrescarInstalacion()
         if (!listo) { aviso(Tema.t("instNotReady")); ventana.pagina = 1; return }
         var elegido = idiomaJuego(ajustes.textoJuego)
         if (!elegido) {
@@ -929,12 +941,7 @@ ApplicationWindow {
 
     Component {
         id: paginaInstalar
-        InstallPage {
-            Connections {
-                target: installer
-                function onFinished() { ventana.idiomasJuego = installer.languages() }
-            }
-        }
+        InstallPage {}
     }
     Component {
         id: paginaGrafico
