@@ -5,6 +5,7 @@
 // build (Developer prompt): cl /O2 /EHsc /std:c++20 sampler.cpp dbghelp.lib
 // usage: sampler.exe <pid | exe name> <seconds> [delay seconds] [top N]
 //        SAMPLER_LINES=<text>: also the source lines of the functions whose name contains <text>
+//        SAMPLER_STACKS=<frames>: also walk that many caller frames per sample and print the callers (inclusive)
 #include <windows.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>
@@ -83,7 +84,10 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "OpenProcess failed (%lu)\n", GetLastError());
         return 1;
     }
+    const int stackFrames = std::getenv("SAMPLER_STACKS") ? std::atoi(std::getenv("SAMPLER_STACKS")) : 0;
     std::this_thread::sleep_for(std::chrono::duration<double>(delay));
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(proc, nullptr, TRUE); // after the delay (modules loaded); the unwinder needs their function tables
     timeBeginPeriod(1);
 
     struct Thread
@@ -91,6 +95,7 @@ int main(int argc, char **argv)
         HANDLE h;
         std::string name;
         std::unordered_map<DWORD64, unsigned> hits;
+        std::unordered_map<DWORD64, unsigned> callers; // return addresses seen in the walked frames
         unsigned samples = 0;
     };
     std::map<DWORD, Thread> threads;
@@ -108,11 +113,22 @@ int main(int argc, char **argv)
             if (SuspendThread(t.h) == static_cast<DWORD>(-1))
                 continue;
             CONTEXT c{};
-            c.ContextFlags = CONTEXT_CONTROL;
+            c.ContextFlags = stackFrames ? CONTEXT_FULL : CONTEXT_CONTROL;
             if (GetThreadContext(t.h, &c))
             {
                 ++t.hits[c.Rip];
                 ++t.samples;
+                STACKFRAME64 f{};
+                f.AddrPC.Offset = c.Rip; f.AddrPC.Mode = AddrModeFlat;
+                f.AddrStack.Offset = c.Rsp; f.AddrStack.Mode = AddrModeFlat;
+                f.AddrFrame.Offset = c.Rbp; f.AddrFrame.Mode = AddrModeFlat;
+                for (int depth = 0; stackFrames && depth <= stackFrames; ++depth)
+                {
+                    if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, t.h, &f, &c, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr) || !f.AddrPC.Offset)
+                        break;
+                    if (depth)
+                        ++t.callers[f.AddrPC.Offset];
+                }
             }
             ResumeThread(t.h);
         }
@@ -120,8 +136,7 @@ int main(int argc, char **argv)
     }
     timeEndPeriod(1);
 
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-    SymInitialize(proc, nullptr, TRUE);
+    SymRefreshModuleList(proc);
     std::vector<Thread *> order;
     for (auto &[id, t] : threads)
         if (t.samples)
@@ -130,7 +145,15 @@ int main(int argc, char **argv)
     alignas(SYMBOL_INFO) char symBuf[sizeof(SYMBOL_INFO) + 512];
     for (Thread *t : order)
     {
-        std::unordered_map<std::string, unsigned> byFunc;
+        std::unordered_map<std::string, unsigned> byFunc, byCaller;
+        for (auto &[addr, n] : t->callers)
+        {
+            auto *sym = reinterpret_cast<SYMBOL_INFO *>(symBuf);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 511;
+            DWORD64 disp = 0;
+            byCaller[SymFromAddr(proc, addr, &disp, sym) ? std::string(sym->Name) : std::string("?")] += n;
+        }
         for (auto &[addr, n] : t->hits)
         {
             auto *sym = reinterpret_cast<SYMBOL_INFO *>(symBuf);
@@ -154,6 +177,15 @@ int main(int argc, char **argv)
         std::printf("\n== %s: %u samples\n", t->name.c_str(), t->samples);
         for (int i = 0; i < top && i < static_cast<int>(rows.size()); ++i)
             std::printf("%6.2f%%  %s\n", 100.0 * rows[i].first / t->samples, rows[i].second.c_str());
+        if (!byCaller.empty())
+        {
+            std::vector<std::pair<unsigned, std::string>> callers;
+            for (auto &[name, n] : byCaller)
+                callers.emplace_back(n, name);
+            std::sort(callers.rbegin(), callers.rend());
+            for (int i = 0; i < top && i < static_cast<int>(callers.size()); ++i)
+                std::printf("   caller %6.2f%%  %s\n", 100.0 * callers[i].first / t->samples, callers[i].second.c_str());
+        }
         // SAMPLER_LINES=<text>: for functions whose name contains it, the source lines where the samples landed
         if (const char *want = std::getenv("SAMPLER_LINES"))
         {

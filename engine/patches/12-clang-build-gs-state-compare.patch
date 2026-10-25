@@ -1,0 +1,221 @@
+clang / llvm-mingw build fixes (phase 4: portable toolchain + PGO); GS state compared field by field.
+- GS draw state (gs_types.h): every register struct of GSDrawState gets a defaulted operator==, and the two raw memcmp
+  compares (hw backend sameState, threaded backend draw-state dedup) use it. The structs have padding bytes the language
+  leaves unspecified; MSVC happened to keep them equal, clang does not, so with clang no two states compared equal: every
+  primitive became its own batch and its own queued state (GS thread ~5.5 s busy per 5 s, ~2 fps in 3D).
+- hw backend draw(): the shadow-volume counting passes (COLCLAMP=0, ALPHA Cs*FIX+Cd, flat colour G += 255 then G += 1) share
+  one GS state, so with the field-wise compare one batch holds both colours; the fixed-function wrap needs one colour per
+  draw, otherwise each triangle goes through the shader blend with a texture barrier in between (SwapBuffers blocked ~1 s
+  per frame in fights). Such a batch is drawn as consecutive runs of one colour, in order.
+- VUops.cpp: <cstdlib> for std::getenv (MSVC included it indirectly). ps2_vu1_native.inl: the slot-count static_assert
+  uses std::extent_v (clang rejects std::size on a reference in a constant expression).
+- ps2_runtime.cpp: an instrumented clang build (-fprofile-instr-generate) writes its profile when the window is closed
+  (weak reference to __llvm_profile_write_file; the shutdown after it can wait on worker threads and never reach the
+  profile runtime's exit hook). No effect on other builds.
+Measured on the ship with the launcher's defaults, combat t=70-145 s, same day: MSVC 58.0 avg / 53.1 min fps;
+llvm-mingw 20261020 (clang 23.1.4, -O3 -march=native, static) 55.6 / 50.4; same + PGO trained on this scripted run
+59.4 / 57.9 (EE thread -27 %, GS -21 %, VU1 worker +8 % against MSVC). Full build ~15 min with clang, 45-60 min with MSVC.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h
+index 02e17d6..cccea7a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h
+@@ -125,6 +125,7 @@ struct GSFrameReg
+     uint32_t fbw = 0;
+     uint8_t psm = 0;
+     uint32_t fbmsk = 0;
++    bool operator==(const GSFrameReg &) const = default;
+ };
+ 
+ struct GSZbufReg
+@@ -132,6 +133,7 @@ struct GSZbufReg
+     uint32_t zbp = 0;
+     uint8_t psm = 0;
+     bool zmask = false;
++    bool operator==(const GSZbufReg &) const = default;
+ };
+ 
+ struct GSScissorReg
+@@ -140,6 +142,7 @@ struct GSScissorReg
+     uint16_t x1 = 0;
+     uint16_t y0 = 0;
+     uint16_t y1 = 0;
++    bool operator==(const GSScissorReg &) const = default;
+ };
+ 
+ struct GSTex0Reg
+@@ -156,12 +159,14 @@ struct GSTex0Reg
+     uint8_t csm = 0;
+     uint8_t csa = 0;
+     uint8_t cld = 0;
++    bool operator==(const GSTex0Reg &) const = default;
+ };
+ 
+ struct GSXYOffsetReg
+ {
+     uint16_t ofx = 0;
+     uint16_t ofy = 0;
++    bool operator==(const GSXYOffsetReg &) const = default;
+ };
+ 
+ struct GSTexaReg
+@@ -169,6 +174,7 @@ struct GSTexaReg
+     uint8_t ta0 = 0;
+     bool aem = false;
+     uint8_t ta1 = 0;
++    bool operator==(const GSTexaReg &) const = default;
+ };
+ 
+ struct GSTexClutReg
+@@ -176,6 +182,7 @@ struct GSTexClutReg
+     uint8_t cbw = 0;
+     uint8_t cou = 0;
+     uint16_t cov = 0;
++    bool operator==(const GSTexClutReg &) const = default;
+ };
+ 
+ struct GSContext
+@@ -192,6 +199,7 @@ struct GSContext
+     uint64_t alpha = 0;
+     uint64_t test = 0;
+     uint64_t fba = 0;
++    bool operator==(const GSContext &) const = default;
+ };
+ 
+ struct GSPrimReg
+@@ -205,6 +213,7 @@ struct GSPrimReg
+     bool fst = false;
+     bool ctxt = false;
+     bool fix = false;
++    bool operator==(const GSPrimReg &) const = default;
+ };
+ 
+ struct GSBitBltBuf
+@@ -249,6 +258,9 @@ struct GSDrawState
+     uint16_t textureWidth = 1;
+     uint16_t textureHeight = 1;
+     bool linearFilter = false;
++
++    // field-wise: padding bytes are unspecified (clang leaves them), so never memcmp these
++    bool operator==(const GSDrawState &) const = default;
+ };
+ 
+ struct GSPrimitiveBatch
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 9ebf56a..ff949d6 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1330,7 +1330,7 @@ struct GSHwBackend::Impl
+     // ---- drawing --------------------------------------------------------------------------------------------------
+     static bool sameState(const GSDrawState &a, const GSDrawState &b)
+     {
+-        return std::memcmp(&a, &b, sizeof(GSDrawState)) == 0;
++        return a == b;
+     }
+ 
+     void addVertex(const GSDrawState &s, const GSVertex &v, float u, float tv, float zmax)
+@@ -1995,6 +1995,35 @@ struct GSHwBackend::Impl
+     }
+ 
+     void draw(const GSDrawState &s, const std::vector<HwVertex> &verts)
++    {
++        // gow-native-pc: the shadow-volume counting passes (G += 255, then G += 1) share one GS state and differ only in
++        // their flat vertex colour, so one batch can hold both. The fixed-function wrap in drawOne needs one colour per
++        // draw (otherwise every triangle goes through the shader blend with a barrier in between, seconds per frame in
++        // fights): such a batch is drawn as consecutive runs of one colour, in order. ALPHA A=Cs B=0 C=FIX D=Cd = 0x68.
++        const uint64_t al = s.context.alpha;
++        if (verts.size() > 3u && !s.prim.tme && s.prim.abe && (s.colclamp & 1u) == 0u && (al & 0xFFu) == 0x68u)
++        {
++            const auto sameColour = [](const HwVertex &a, const HwVertex &b) { return a.r == b.r && a.g == b.g && a.b == b.b; };
++            size_t runStart = 0;
++            for (size_t i = 3; i + 3 <= verts.size(); i += 3)
++                if (!sameColour(verts[i], verts[runStart]))
++                {
++                    splitRun.assign(verts.begin() + static_cast<std::ptrdiff_t>(runStart), verts.begin() + static_cast<std::ptrdiff_t>(i));
++                    drawOne(s, splitRun);
++                    runStart = i;
++                }
++            if (runStart != 0)
++            {
++                splitRun.assign(verts.begin() + static_cast<std::ptrdiff_t>(runStart), verts.end());
++                drawOne(s, splitRun);
++                return;
++            }
++        }
++        drawOne(s, verts);
++    }
++    std::vector<HwVertex> splitRun;
++
++    void drawOne(const GSDrawState &s, const std::vector<HwVertex> &verts)
+     {
+         const Api &g = gl();
+         ++frameBatch;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 10338ba..e2d97b2 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -118,7 +118,7 @@ void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size)
+     if (op == Op::Submit && m_compactQueue)
+     {
+         const auto &draw = *static_cast<const GSPrimitiveBatch *>(payload);
+-        if (!m_drawStateValid || std::memcmp(&m_lastDrawState, &draw.state, sizeof(draw.state)) != 0)
++        if (!m_drawStateValid || !(m_lastDrawState == draw.state))
+         {
+             std::memcpy(&m_lastDrawState, &draw.state, sizeof(draw.state));
+             m_drawStateValid = true;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 1307705..81ebdda 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -38,6 +38,10 @@ static bool gowUsePcsx2Vu1(); // GOW_VU1_PCSX2=1, defined before PS2Runtime::ini
+ #include <sstream>
+ #include <cstdio>
+ #include <cstdlib>
++#if defined(__clang__)
++// gow-native-pc: compiler-rt's profile writer, linked only into instrumented (-fprofile-instr-generate) builds
++extern "C" int __llvm_profile_write_file(void) __attribute__((weak));
++#endif
+ 
+ // GOW-Port: audio device position for the movie A/V check (GOW_MPEG_DIAG, Kernel/Stubs/MPEG.cpp): frames the device
+ // has played (including silence fill) and frames the sound engine produced (= GOW_AUDIO_PCM file position).
+@@ -2726,6 +2730,12 @@ void PS2Runtime::run()
+ 
+         if (WindowShouldClose())
+         {
++#if defined(__clang__)
++            // gow-native-pc: an instrumented (PGO training) build writes its profile here; the shutdown that follows can
++            // wait on worker threads and never reach the runtime's own exit hook
++            if (&__llvm_profile_write_file != nullptr)
++                std::fprintf(stderr, "[pgo] profile written: %d\n", __llvm_profile_write_file());
++#endif
+             RUNTIME_LOG("[run] window close requested, breaking out of loop");
+             requestStop();
+             break;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index c8aa7e6..2b8d9bf 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -707,8 +707,9 @@ VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU
+ void VU1NativeAccess::codeChanged(VU1Interpreter::NativeState &ns, const uint8_t *code)
+ {
+     using NS = VU1Interpreter::NativeState;
+-    constexpr uint32_t kPairs = sizeof(ns.code) / 8u;
+-    static_assert(kPairs == std::size(ns.slots));
++    // gow-native-pc: from the type, not the reference parameter (clang does not treat std::size(ref.member) as constant)
++    constexpr uint32_t kPairs = sizeof(NS::code) / 8u;
++    static_assert(kPairs == std::extent_v<decltype(NS::slots)>);
+     ++ns.codeChanges;
+     if (!ns.codeValid)
+     {
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu_pcsx2/VUops.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu_pcsx2/VUops.cpp
+index 304a3fd..3595d4a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu_pcsx2/VUops.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu_pcsx2/VUops.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "Common.h"
+ #include "VUops.h"
++#include <cstdlib> // gow-native-pc: std::getenv / std::strtol (MSVC included it indirectly)
+ #include "GS.h"
+ #include "Gif_Unit.h"
+ #include "MTVU.h"

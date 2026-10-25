@@ -1,0 +1,437 @@
+Sound mixer batches, EE COP0 Count, IOP heap reuse.
+- SPU2 mixer (sound_engine): mixBatch computes a batch voice by voice (a voice's state does not depend on the others
+  within a batch; the dry mix is an integer sum) instead of 48 voice steps per frame. advanceTo only records the time and
+  mixes once 64 frames (1.3 ms) are due; every LIBSD API call (set/get param, switch, address, core attribute, sample RAM,
+  streams) first mixes what is due (flushPending), so the driver sees and changes the same state as before. GOW_SND_VERIFY=1
+  mixes every batch also with the old per-frame step() and compares: 5.9 M frames, 0 differences. The mixer went from ~14 %
+  to ~4 % of the game thread with sound on. GOW_SND_PERFRAME=1: the old per-frame path.
+- COP0 Count: mfc0 / mtc0 Count read and set the EE cycle counter (PS2Runtime::eeCountRegister / setEeCountRegister)
+  instead of ctx->cop0_count, which nothing advanced. God of War's 0x185A20 builds a 64-bit clock from Count and works
+  until a per-frame deadline (0x781EC cycles, ~1.7 ms): with a frozen Count it did all pending work in one frame, as the
+  God of War II port found in its loader (9ccffe1). GOW_EE_COUNT_FROZEN=1: the old value. Needs the recomp stage.
+- IOP heap (iop_memory): first fit from the heap base, as the Killzone port's 0028; the search started at a cursor that only
+  moved forward, so memory the IRX modules freed was never handed out again. QueryMaxFreeMemSize reports the largest gap;
+  a failed allocation is logged ([iop-heap]). PS2X_IOP_HEAP_REUSE=0: the old allocator.
+Measured on the ship with the launcher's defaults (with 10): combat average 56.5 -> 58.8 fps, minimum 51.4 -> 56.0;
+GOW_VU1N_VERIFY clean, no IOP allocation failure, gameplay reached.
+
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/iop_memory.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/iop_memory.cpp
+index e1e20a9..1fafbc3 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -300,7 +300,11 @@ namespace ps2x::iop::detail
+             return address;
+         }
+ 
+-        uint32_t candidate = alignUp(m_heapCursor, alignment);
++        // gow-native-pc: first fit from the heap base (the Killzone port's 0028). The search used to start at a cursor that only
++        // moved forward, so memory the IRX modules freed (AllocSysMemory / heaplib Malloc) was never handed out again and a
++        // long session could run the 1.5 MB heap dry. PS2X_IOP_HEAP_REUSE=0: the old allocator.
++        static const bool reuse = [] { const char *v = std::getenv("PS2X_IOP_HEAP_REUSE"); return !(v && v[0] == '0'); }();
++        uint32_t candidate = alignUp(reuse ? HeapBase : m_heapCursor, alignment);
+         for (;;)
+         {
+             bool overlap = false;
+@@ -317,7 +321,13 @@ namespace ps2x::iop::detail
+                 break;
+         }
+         if (candidate > HeapLimit || size > HeapLimit - candidate)
++        {
++            static unsigned failures = 0;
++            if (++failures <= 20u)
++                std::fprintf(stderr, "[iop-heap] allocation of %u bytes failed (largest free block %u bytes, %zu blocks in use)\n",
++                             size, maxFreeMemory(), m_allocations.size());
+             return 0u;
++        }
+         m_allocations.push_back({candidate, size});
+         markOwned(candidate, size);
+         m_heapCursor = std::max(m_heapCursor, candidate + size);
+@@ -340,7 +350,24 @@ namespace ps2x::iop::detail
+ 
+     uint32_t IopMemory::maxFreeMemory() const
+     {
+-        return m_heapCursor < HeapLimit ? HeapLimit - m_heapCursor : 0u;
++        static const bool reuse = [] { const char *v = std::getenv("PS2X_IOP_HEAP_REUSE"); return !(v && v[0] == '0'); }();
++        if (!reuse)
++            return m_heapCursor < HeapLimit ? HeapLimit - m_heapCursor : 0u;
++        // gow-native-pc: the largest gap between the blocks in use (QueryMaxFreeMemSize), now that freed memory is reused
++        std::vector<std::pair<uint32_t, uint32_t>> used;
++        used.reserve(m_allocations.size());
++        for (const auto &block : m_allocations)
++            if (block.address < HeapLimit && block.address + block.size > HeapBase)
++                used.emplace_back(block.address, block.address + block.size);
++        std::sort(used.begin(), used.end());
++        uint32_t largest = 0, at = HeapBase;
++        for (const auto &[start, end] : used)
++        {
++            if (start > at)
++                largest = std::max(largest, start - at);
++            at = std::max(at, end);
++        }
++        return std::max(largest, at < HeapLimit ? HeapLimit - at : 0u);
+     }
+ 
+     std::optional<IopMemory::Allocation> IopMemory::allocationContaining(uint32_t address) const
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+index 06c74ff..c5286c5 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+@@ -58,10 +58,12 @@ namespace ps2x::iop::detail
+             m_output.clear();
+         }
+         m_lastCycle = 0;
++        m_targetCycle = 0;
+     }
+ 
+     void SoundEngine::initCore(uint32_t core)
+     {
++        flushPending();
+         Core &c = m_cores[core & 1u];
+         const std::array<Voice, VoicesPerCore> voices{};
+         c = Core{};
+@@ -73,6 +75,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::setParam(uint32_t entry, uint16_t value)
+     {
++        flushPending();
+         Core &c = m_cores[coreOf(entry)];
+         const uint32_t voice = voiceOf(entry);
+         // GOW_SND_REGLOG=1: core-level writes (MMIX, master/effect/input volumes) as the driver sets them
+@@ -110,6 +113,7 @@ namespace ps2x::iop::detail
+ 
+     uint16_t SoundEngine::getParam(uint32_t entry) const
+     {
++        const_cast<SoundEngine *>(this)->flushPending();
+         const Core &c = m_cores[coreOf(entry)];
+         const uint32_t voice = std::min(voiceOf(entry), VoicesPerCore - 1u);
+         const Voice &v = c.voices[voice];
+@@ -142,6 +146,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::setSwitch(uint32_t entry, uint32_t mask)
+     {
++        flushPending();
+         Core &c = m_cores[coreOf(entry)];
+         mask &= 0xFFFFFFu;
+         static const bool callLog = std::getenv("GOW_SND_CALLLOG") != nullptr;
+@@ -164,6 +169,7 @@ namespace ps2x::iop::detail
+ 
+     uint32_t SoundEngine::getSwitch(uint32_t entry) const
+     {
++        const_cast<SoundEngine *>(this)->flushPending();
+         const Core &c = m_cores[coreOf(entry)];
+         switch (idOf(entry))
+         {
+@@ -182,6 +188,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::setAddr(uint32_t entry, uint32_t byteAddress)
+     {
++        flushPending();
+         Core &c = m_cores[coreOf(entry)];
+         const uint32_t halfwords = (byteAddress >> 1u) & (RamHalfwords - 1u) & ~7u;
+         const uint32_t voice = voiceOf(entry);
+@@ -217,6 +224,7 @@ namespace ps2x::iop::detail
+ 
+     uint32_t SoundEngine::getAddr(uint32_t entry) const
+     {
++        const_cast<SoundEngine *>(this)->flushPending();
+         const Core &c = m_cores[coreOf(entry)];
+         const Voice &v = c.voices[std::min(voiceOf(entry), VoicesPerCore - 1u)];
+         uint32_t halfwords = 0;
+@@ -248,6 +256,7 @@ namespace ps2x::iop::detail
+     // sceSdSetCoreAttr ids (entry & ~1): 2 effect enable, 4 IRQ enable, 6 mute, 8 noise clock, 0xA SPDIF mode
+     void SoundEngine::setCoreAttr(uint32_t entry, uint32_t value)
+     {
++        flushPending();
+         Core &c = m_cores[coreOf(entry)];
+         switch (entry & ~1u)
+         {
+@@ -261,6 +270,7 @@ namespace ps2x::iop::detail
+ 
+     uint32_t SoundEngine::getCoreAttr(uint32_t entry) const
+     {
++        const_cast<SoundEngine *>(this)->flushPending();
+         const Core &c = m_cores[coreOf(entry)];
+         switch (entry & ~1u)
+         {
+@@ -276,6 +286,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::writeSampleRam(uint32_t byteAddress, const uint8_t *source, size_t bytes)
+     {
++        flushPending();
+         uint32_t halfword = byteAddress >> 1u;
+         for (size_t i = 0; i + 1u < bytes; i += 2u)
+             m_ram[halfword++ & (RamHalfwords - 1u)] = static_cast<uint16_t>(source[i] | (source[i + 1u] << 8u));
+@@ -283,6 +294,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::readSampleRam(uint32_t byteAddress, uint8_t *destination, size_t bytes) const
+     {
++        const_cast<SoundEngine *>(this)->flushPending();
+         uint32_t halfword = byteAddress >> 1u;
+         for (size_t i = 0; i + 1u < bytes; i += 2u)
+         {
+@@ -294,6 +306,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::clearSampleRam(uint32_t byteAddress, size_t bytes)
+     {
++        flushPending();
+         uint32_t halfword = byteAddress >> 1u;
+         for (size_t i = 0; i + 1u < bytes; i += 2u)
+             m_ram[halfword++ & (RamHalfwords - 1u)] = 0u;
+@@ -303,6 +316,7 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::startStream(uint32_t core, const uint8_t *ring, uint32_t size, bool loop)
+     {
++        flushPending();
+         StreamRing &s = m_stream[core & 1u];
+         s.loop = loop;
+         s.base = ring;
+@@ -314,11 +328,13 @@ namespace ps2x::iop::detail
+ 
+     void SoundEngine::stopStream(uint32_t core)
+     {
++        flushPending();
+         m_stream[core & 1u].active = false;
+     }
+ 
+     bool SoundEngine::takeStreamHalf(uint32_t core) noexcept
+     {
++        flushPending();
+         const bool half = m_streamHalf[core & 1u];
+         m_streamHalf[core & 1u] = false;
+         return half;
+@@ -614,9 +630,80 @@ namespace ps2x::iop::detail
+         }
+     }
+ 
++    // gow-native-pc: the same frames as step() (one frame at a time, every voice per frame), computed voice by voice over the
++    // whole batch: a voice's state does not depend on the other voices within a batch (registers only change between
++    // advanceTo calls), and the dry mix is an integer sum, so the order of the additions does not change it. The voice loop
++    // runs once per batch instead of 48 voice calls per frame, inactive voices are skipped once.
++    void SoundEngine::mixBatch(int16_t *out, size_t frames)
++    {
++        m_mix.assign(frames * 4u, 0);
++        for (uint32_t core = 0; core < 2u; ++core)
++        {
++            Core &c = m_cores[core];
++            int32_t *mixL = m_mix.data() + (core * 2u) * frames;
++            int32_t *mixR = mixL + frames;
++            for (uint32_t index = 0; index < VoicesPerCore; ++index)
++            {
++                if (!c.voices[index].active)
++                    continue;
++                const bool toL = (c.vmixL & (1u << index)) != 0u, toR = (c.vmixR & (1u << index)) != 0u;
++                const int32_t volL = volumeOf(c.voices[index].volL), volR = volumeOf(c.voices[index].volR);
++                for (size_t t = 0; t < frames; ++t)
++                {
++                    const int32_t sample = stepVoice(c, index);
++                    if (sample == 0)
++                        continue;
++                    if (toL)
++                        mixL[t] += (sample * volL) >> 14;
++                    if (toR)
++                        mixR[t] += (sample * volR) >> 14;
++                }
++            }
++            for (size_t t = 0; t < frames; ++t)
++                streamSample(core, mixL[t], mixR[t]);
++        }
++        const int32_t master[2][2] = {{volumeOf(m_cores[0].mvolL), volumeOf(m_cores[0].mvolR)},
++                                      {volumeOf(m_cores[1].mvolL), volumeOf(m_cores[1].mvolR)}};
++        for (size_t t = 0; t < frames; ++t)
++            for (uint32_t side = 0; side < 2u; ++side)
++            {
++                const int32_t core0 = (m_mix[side * frames + t] * master[0][side]) >> 14;
++                out[t * 2u + side] = clamp16(((core0 + m_mix[(2u + side) * frames + t]) * master[1][side]) >> 14);
++            }
++        static std::FILE *raw = [] { const char *path = std::getenv("GOW_AUDIO_RAW"); return path ? std::fopen(path, "wb") : nullptr; }();
++        if (raw)
++        {
++            std::fwrite(out, sizeof(int16_t), frames * 2u, raw);
++            std::fflush(raw);
++        }
++    }
++
+     // gow-native-pc: the frames are mixed into m_batch and appended to the output with one lock per call, not one per frame
+     // (48,000 lock/unlock pairs a second on the game thread, contended by the audio device thread).
++    // GOW_SND_VERIFY=1: every batch is also mixed by step() from the same state and compared ([snd-verify] lines);
++    // GOW_SND_VOICEDUMP and GOW_SND_PERFRAME=1 keep the per-frame step().
++    uint32_t SoundEngine::streamPosition(uint32_t core) const
++    {
++        const_cast<SoundEngine *>(this)->flushPending();
++        return m_stream[core & 1u].position;
++    }
++
+     void SoundEngine::advanceTo(uint64_t iopCycle)
++    {
++        static const bool perFrame = std::getenv("GOW_SND_VOICEDUMP") != nullptr || std::getenv("GOW_SND_PERFRAME") != nullptr;
++        m_targetCycle = std::max(m_targetCycle, iopCycle);
++        if (!perFrame && m_targetCycle < m_lastCycle + kMinBatchFrames * CyclesPerSample)
++            return;
++        mixTo(m_targetCycle);
++    }
++
++    void SoundEngine::flushPending()
++    {
++        if (m_targetCycle > m_lastCycle)
++            mixTo(m_targetCycle);
++    }
++
++    void SoundEngine::mixTo(uint64_t iopCycle)
+     {
+         if (iopCycle <= m_lastCycle)
+             return;
+@@ -624,8 +711,39 @@ namespace ps2x::iop::detail
+         if (samples == 0u)
+             return;
+         m_batch.resize(static_cast<size_t>(samples) * 2u);
+-        for (uint64_t i = 0; i < samples; ++i)
+-            step(m_batch.data() + i * 2u);
++        static const bool perFrame = std::getenv("GOW_SND_VOICEDUMP") != nullptr || std::getenv("GOW_SND_PERFRAME") != nullptr;
++        static const bool verify = std::getenv("GOW_SND_VERIFY") != nullptr;
++        if (perFrame)
++        {
++            for (uint64_t i = 0; i < samples; ++i)
++                step(m_batch.data() + i * 2u);
++        }
++        else if (verify)
++        {
++            const auto cores = m_cores;
++            const auto stream = m_stream;
++            const auto streamHalf = m_streamHalf;
++            std::vector<int16_t> reference(m_batch.size());
++            for (uint64_t i = 0; i < samples; ++i)
++                step(reference.data() + i * 2u);
++            const auto coresStep = m_cores;
++            m_cores = cores;
++            m_stream = stream;
++            m_streamHalf = streamHalf;
++            mixBatch(m_batch.data(), static_cast<size_t>(samples));
++            static unsigned long long batches = 0, bad = 0, frames = 0;
++            ++batches;
++            frames += samples;
++            const bool same = reference == m_batch &&
++                              std::memcmp(coresStep.data(), m_cores.data(), sizeof(Core) * m_cores.size()) == 0;
++            if (!same && ++bad <= 20u)
++                std::fprintf(stderr, "[snd-verify] batch %llu (%llu frames): mixBatch differs from step()\n", batches,
++                             static_cast<unsigned long long>(samples));
++            if (batches % 20000u == 0u)
++                std::fprintf(stderr, "[snd-verify] %llu batches, %llu frames, %llu different\n", batches, frames, bad);
++        }
++        else
++            mixBatch(m_batch.data(), static_cast<size_t>(samples));
+         m_lastCycle += samples * CyclesPerSample;
+         std::lock_guard<std::mutex> lock(m_outputMutex);
+         m_output.insert(m_output.end(), m_batch.begin(), m_batch.end());
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
+index 5f8d5c1..2e85210 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
+@@ -54,11 +54,14 @@ namespace ps2x::iop::detail
+         };
+         void startStream(uint32_t core, const uint8_t *ring, uint32_t size, bool loop);
+         void stopStream(uint32_t core);
+-        [[nodiscard]] uint32_t streamPosition(uint32_t core) const { return m_stream[core & 1u].position; }
++        [[nodiscard]] uint32_t streamPosition(uint32_t core) const;
+         [[nodiscard]] bool takeStreamHalf(uint32_t core) noexcept; // a half was consumed since the last call
+ 
+-        // time: one stereo sample every CyclesPerSample IOP cycles
++        // time: one stereo sample every CyclesPerSample IOP cycles. gow-native-pc: advanceTo only records the time and
++        // mixes once kMinBatchFrames are due; every API call above first mixes what is due (flushPending), so the state the
++        // driver sees and changes is the same as when every frame was mixed at once.
+         void advanceTo(uint64_t iopCycle);
++        void flushPending();
+ 
+         // stereo samples produced so far (producer: IOP thread, consumer: host audio thread)
+         [[nodiscard]] size_t pendingFrames() const;
+@@ -104,6 +107,9 @@ namespace ps2x::iop::detail
+         static uint32_t naxOf(const Voice &v) noexcept;
+         void streamSample(uint32_t core, int32_t &left, int32_t &right);
+         void step(int16_t *out); // one stereo frame into out[0..1]
++        void mixTo(uint64_t iopCycle);
++        static constexpr uint64_t kMinBatchFrames = 64u; // 1.3 ms
++        void mixBatch(int16_t *out, size_t frames); // gow-native-pc: `frames` frames, voice by voice (same samples as step)
+ 
+         std::vector<uint16_t> m_ram;
+         std::array<Core, 2> m_cores{};
+@@ -111,8 +117,10 @@ namespace ps2x::iop::detail
+         std::array<bool, 2> m_streamHalf{};
+         std::vector<int16_t> m_output;
+         std::vector<int16_t> m_batch; // gow-native-pc: frames mixed by advanceTo, appended to m_output under one lock
++        std::vector<int32_t> m_mix;   // gow-native-pc: mixBatch accumulators, [core][side][frame]
+         mutable std::mutex m_outputMutex;
+         double m_resamplePhase = 0.0; // drainOutput: fractional read position when playing back faster
+         uint64_t m_lastCycle = 0;
++        uint64_t m_targetCycle = 0; // the latest advanceTo time (frames up to it are mixed by flushPending at the latest)
+     };
+ }
+diff --git a/PS2Recomp/ps2xRecomp/src/lib/cop0_translator.cpp b/PS2Recomp/ps2xRecomp/src/lib/cop0_translator.cpp
+index 1823a39..d4630c6 100644
+--- a/PS2Recomp/ps2xRecomp/src/lib/cop0_translator.cpp
++++ b/PS2Recomp/ps2xRecomp/src/lib/cop0_translator.cpp
+@@ -44,7 +44,7 @@ namespace ps2recomp
+             case COP0_REG_BADVADDR:
+                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_badvaddr);", rt);
+             case COP0_REG_COUNT:
+-                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
++                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)runtime->eeCountRegister(ctx));", rt);
+             case COP0_REG_ENTRYHI:
+                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entryhi);", rt);
+             case COP0_REG_COMPARE:
+@@ -94,7 +94,7 @@ namespace ps2recomp
+             case COP0_REG_BADVADDR:
+                 return "// MTC0 to BADVADDR register ignored (read-only)";
+             case COP0_REG_COUNT:
+-                return fmt::format("ctx->cop0_count = GPR_U32(ctx, {});", rt);
++                return fmt::format("runtime->setEeCountRegister(ctx, GPR_U32(ctx, {}));", rt);
+             case COP0_REG_ENTRYHI:
+                 return fmt::format("ctx->cop0_entryhi = GPR_U32(ctx, {}) & 0xC00000FF;", rt);
+             case COP0_REG_COMPARE:
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+index 4503d4b..1109fc6 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+@@ -412,6 +412,11 @@ public:
+     // eeCheckpointFull(c).
+     bool eeCheckpointQuiet(uint32_t cycles) noexcept { return m_eeClock.advanceQuiet(cycles); }
+     bool eeCheckpointFull(uint32_t cycles) noexcept { return eeCheckpointDueFull(cycles); }
++    // gow-native-pc: COP0 Count ("mfc0 / mtc0 Count" in the generated code) ticks with the EE cycle counter. The
++    // recompiler used to read ctx->cop0_count, which nothing advanced: God of War's 0x185A20 works until Count passes a
++    // per-frame deadline and so did all its pending work in one frame. GOW_EE_COUNT_FROZEN=1: the old frozen value.
++    uint32_t eeCountRegister(const R5900Context *ctx) const noexcept;
++    void setEeCountRegister(R5900Context *ctx, uint32_t value) noexcept;
+     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
+ 
+     struct EeExitHandlerRegistration
+@@ -570,6 +575,7 @@ private:
+     uint8_t *m_boundGSVram = nullptr;
+     // Incremented on the EE executor when generated code yields at a checkpoint.
+     uint64_t m_eeCheckpointSerial = 0u;
++    uint64_t m_eeCountBase = 0u; // eeCycle at which COP0 Count was 0 (setEeCountRegister)
+     EeCheckpointClock m_eeClock; // driven by m_eeScheduler (EeScheduler::m_clock)
+     bool eeCheckpointDueFull(uint32_t cycles) noexcept;
+ };
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f7b79aa..1307705 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2469,6 +2469,20 @@ void PS2Runtime::postEeEvent(EeEvent event)
+     m_eeScheduler->postEvent(event);
+ }
+ 
++uint32_t PS2Runtime::eeCountRegister(const R5900Context *ctx) const noexcept
++{
++    static const bool frozen = std::getenv("GOW_EE_COUNT_FROZEN") != nullptr;
++    if (frozen)
++        return ctx->cop0_count;
++    return static_cast<uint32_t>(m_eeClock.eeCycle - m_eeCountBase);
++}
++
++void PS2Runtime::setEeCountRegister(R5900Context *ctx, uint32_t value) noexcept
++{
++    ctx->cop0_count = value;
++    m_eeCountBase = m_eeClock.eeCycle - value;
++}
++
+ bool PS2Runtime::eeCheckpointDueFull(uint32_t cycles) noexcept
+ {
+     const bool due = m_eeScheduler->checkpointDue(cycles);

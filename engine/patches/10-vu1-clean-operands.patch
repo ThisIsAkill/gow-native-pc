@@ -1,0 +1,453 @@
+Native VU1: clean-operand analysis across blocks (after rac-rs tools/vu/vuclean.py, AsobiCodes/rac-rs).
+- vu1n_gen.py: a VF lane is clean when its exponent is not 255; reading it with vu1n::ld instead of vu1n::ldn (which turns
+  Inf/NaN into +-FLT_MAX) gives the same value. Every pair has one affine effect (pair_effect: lanes made clean by
+  ADD/SUB/MUL/MADD/MSUB/MAX/MINI/ITOF, lanes made unknown by every other VF write, now also FTOI/ABS/exact-engine upper ops
+  and the upper op of a branch pair, which the per-block tracking left marked clean). Per micro-memory a forward fixpoint
+  over the static control flow (meet = AND) gives each block's entry state, ANDed over every image the block is in; the
+  block is compiled for it and registers its masks (VU1NativeLanes: req = entry lanes it reads unnormalised, gen / keep =
+  its effect). 9,833 -> 6,273 normalised operand loads.
+- Runtime (runNative): the lanes known clean are tracked along the blocks actually run (known = (known & keep) | gen,
+  vf00 always); a block whose req is not all known gets its lanes checked in the registers (vu1n::lanesClean) and runs in
+  the exact engine if one is not clean. So the result never depends on the analysis being complete (new micro-memories,
+  jumps through registers, exact-engine stretches). GOW_VU1N_DIAG prints laneChecks / laneFails.
+Verified on the ship with the launcher's defaults: GOW_VU1N_VERIFY=20000 0 mismatches against the exact engine, 11.8 M lane
+checks 0 failures. With 10 and 11: combat average 56.5 -> 58.8 fps, minimum 51.4 -> 56.0.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 095fd6f..715774b 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -96,6 +96,13 @@ using VU1NativeFn = uint32_t (*)(VU1NativeCtx &);
+ // Registered by the generated tables: key = FNV-1a over (pc, block words), see vu1n::blockKey. pairs: block length in the
+ // low 16 bits, bit 16 set when the block reads MAC/clip flags written before it (it then needs exact entry timing).
+ void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail);
++// gow-native-pc: clean-operand masks of a block (vu1n_gen.py pair_effect): bit r*4 + lane (bit 0 = x) of VF r. req: lanes
++// the block's code reads without normalising (it assumes no Inf/NaN bits there on entry); exit state = (entry & keep) | gen.
++struct VU1NativeLanes
++{
++    uint64_t req[2], gen[2], keep[2];
++};
++void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes);
+ 
+ struct VU1Interpreter::NativeState
+ {
+@@ -135,6 +142,7 @@ struct VU1Interpreter::NativeState
+         const uint8_t *idle = nullptr;
+         BlockTiming *bt = nullptr;
+         const VU1TailDesc *tail = nullptr;
++        const VU1NativeLanes *lanes = nullptr; // clean-operand assumption and effect (null: assumes nothing, keeps nothing)
+         uint16_t pairs = 0;
+         uint16_t idleEnd = 0; // idle[pairs - 1] + 1: the block's length in cycles with an idle pipeline
+         bool known = false;
+@@ -173,6 +181,7 @@ struct VU1Interpreter::NativeState
+     unsigned verifyLeft = std::getenv("GOW_VU1N_VERIFY") ? static_cast<unsigned>(std::atoi(std::getenv("GOW_VU1N_VERIFY"))) : 0u;
+     bool diag = std::getenv("GOW_VU1N_DIAG") != nullptr;
+     unsigned long long nativePairs = 0, nativeBlocks = 0, missBlocks = 0, nativeRuns = 0, codeChanges = 0, slotSetups = 0;
++    unsigned long long laneChecks = 0, laneFails = 0; // gow-native-pc: clean-operand entry checks run / failed
+     std::unordered_map<uint32_t, unsigned> missPcs, missHits;
+     unsigned limit = ~0u, count = 0; // verify bisection: native blocks allowed in this run
+     VU1State snap;                   // state on entry of block number `limit` (verify bisection)
+@@ -343,6 +352,25 @@ namespace vu1n
+         return _mm_castsi128_ps(_mm_blendv_epi8(b, fixed, bad));
+     }
+     VU1N_INLINE __m128 ldn(const VU1State &s, int r) { return nrm(_mm_loadu_ps(s.vf[r])); }
++    // gow-native-pc: true when none of the VF lanes in need (bit r*4 + lane, see VU1NativeLanes) has exponent 255
++    VU1N_INLINE bool lanesClean(const VU1State &s, uint64_t need0, uint64_t need1)
++    {
++        const __m128i expMask = _mm_set1_epi32(0x7F800000);
++        for (int half = 0; half < 2; ++half)
++        {
++            for (uint64_t need = half ? need1 : need0; need != 0u;)
++            {
++                const int bit = std::countr_zero(need);
++                const int base = bit & ~3;
++                const int lanesWanted = static_cast<int>((need >> base) & 0xFu);
++                const __m128i b = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s.vf[half * 16 + base / 4]));
++                if (_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(b, expMask), expMask))) & lanesWanted)
++                    return false;
++                need &= ~(0xFull << base);
++            }
++        }
++        return true;
++    }
+     VU1N_INLINE __m128 ldAcc(const VU1State &s) { return _mm_loadu_ps(s.acc); }
+     template <int M> // M in SSE order
+     VU1N_INLINE void stf(float *p, __m128 v)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index cf0591e..c8aa7e6 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -17,6 +17,7 @@ namespace
+         const VU1TailDesc *tail;
+         bool readsEntryFlags; // reads MAC/clip flags written before the block (vu1n_gen.py: bit 16 of pairs)
+         std::vector<uint8_t> cyc; // issue cycle of each pair (block entry = 0), filled on first use
++        const VU1NativeLanes *lanes = nullptr; // clean-operand masks (gow-native-pc)
+     };
+     std::unordered_map<uint64_t, NativeEntry> &nativeRegistry()
+     {
+@@ -74,7 +75,12 @@ namespace
+ 
+ void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail)
+ {
+-    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}};
++    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}, nullptr};
++}
++
++void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes)
++{
++    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}, lanes};
+ }
+ 
+ // Issue cycles of the pairs of a block as the exact engine would see them (operand/pipeline stalls included), assuming
+@@ -766,6 +772,7 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+                 sl.readsEntryFlags = bt.readsEntryFlags;
+                 sl.memoable = bt.scalarRead == 0u;
+                 sl.tail = it->second.tail;
++                sl.lanes = it->second.lanes;
+                 if (bt.scalarPairs.size() > std::size(sl.scalar))
+                     sl.scalarCount = VU1Interpreter::NativeState::kScalarMany;
+                 else
+@@ -851,6 +858,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+     // reloaded after each one): diagnostics counters added to ns on exit, the verify bisection limit fixed for the run
+     const bool bisecting = ns.limit != ~0u;
+     uint64_t blocks = 0u, pairs = 0u;
++    // gow-native-pc: VF lanes known to hold no Inf/NaN bits along the blocks run since this native entry (vf00 always).
++    // A block compiled to read some lanes without normalising them (sl.lanes->req) runs only when they are known or
++    // checked clean; otherwise the exact engine takes over at that block.
++    uint64_t known0 = 0xFu, known1 = 0u;
+     for (;;)
+     {
+         if (m_stopRequested || m_cycle >= context.budgetEnd)
+@@ -906,6 +917,28 @@ bool VU1Interpreter::runNative(StepContext &context)
+             ++ns.count;
+             ns.trace.push_back(pc);
+         }
++        if (const VU1NativeLanes *lz = sl.lanes)
++        {
++            const uint64_t need0 = lz->req[0] & ~known0, need1 = lz->req[1] & ~known1;
++            if ((need0 | need1) != 0u)
++            {
++                ++ns.laneChecks;
++                if (!vu1n::lanesClean(m_state, need0, need1))
++                {
++                    ++ns.laneFails;
++                    break;
++                }
++                known0 |= need0;
++                known1 |= need1;
++            }
++            known0 = (known0 & lz->keep[0]) | lz->gen[0] | 0xFu;
++            known1 = (known1 & lz->keep[1]) | lz->gen[1];
++        }
++        else
++        {
++            known0 = 0xFu;
++            known1 = 0u;
++        }
+         const uint64_t start = m_cycle;
+         // Values never depend on timing, only flag reads do. A block that reads flags written before it gets its exact
+         // issue cycles from the pipeline state at entry (the stalls decide which of those flags it sees); the others use
+@@ -954,9 +987,11 @@ bool VU1Interpreter::runNative(StepContext &context)
+         if (std::chrono::steady_clock::now() - last > std::chrono::seconds(5))
+         {
+             last = std::chrono::steady_clock::now();
+-            std::fprintf(stderr, "[vu1n] nativePairs=%llu nativeBlocks=%llu missBlocks=%llu nativeEntries=%llu distinctMissPcs=%zu codeChanges=%llu slotSetups=%llu\n",
+-                         ns.nativePairs, ns.nativeBlocks, ns.missBlocks, ns.nativeRuns, ns.missPcs.size(), ns.codeChanges, ns.slotSetups);
++            std::fprintf(stderr, "[vu1n] nativePairs=%llu nativeBlocks=%llu missBlocks=%llu nativeEntries=%llu distinctMissPcs=%zu codeChanges=%llu slotSetups=%llu laneChecks=%llu laneFails=%llu\n",
++                         ns.nativePairs, ns.nativeBlocks, ns.missBlocks, ns.nativeRuns, ns.missPcs.size(), ns.codeChanges, ns.slotSetups,
++                         ns.laneChecks, ns.laneFails);
+             ns.nativePairs = ns.nativeBlocks = ns.missBlocks = ns.nativeRuns = ns.codeChanges = ns.slotSetups = 0;
++            ns.laneChecks = ns.laneFails = 0;
+             std::vector<std::pair<unsigned, uint32_t>> top;
+             for (const auto &kv : ns.missHits)
+                 top.emplace_back(kv.second, kv.first);
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index 0624851..0fb693f 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -150,7 +150,83 @@ def upper_info(u):
+     return {x for x in w if x}, r, writes_mac, reads_q
+ 
+ 
+-def emit_upper(u, pc, idx, mac_var, clip_var, prev_clip, clean=frozenset()):
++# ---------------------------------------------------------------------------------------------------------------------
++# clean operands (gow-native-pc, after rac-rs tools/vu/vuclean.py)
++#
++# A VF lane is clean when its exponent is not 255 (no Inf / NaN bits): reading it through vu1n::ldn (which turns exponent
++# 255 into +-FLT_MAX, like the exact engine's operand normalisation) gives the same value as a plain vu1n::ld. State: a
++# 128-bit mask, bit r*4 + lane (SSE lane order, bit 0 = x) set when VF r's lane is known clean. Results of ADD / SUB / MUL
++# / MADD / MSUB (clamped), MAX / MINI (of normalised operands) and ITOF are clean; every other VF write (lower ops, FTOI,
++# ABS, ops run by the exact engine) makes the register unknown. A pair's effect is affine (lanes set, cleared or kept),
++# so a block is summarised by gen (clean on exit whatever the entry) and keep (unchanged by the block).
++ALL_LANES = (1 << 128) - 1
++VF0_LANES = 0xF  # vf00 = (0, 0, 0, 1): always clean
++
++
++def lanes(r, m=0xF):
++    return (m & 0xF) << (r * 4)
++
++
++def pair_effect(l, u):
++    """(kill_lower, kill_upper, set_upper): lanes the lower op makes unknown (before the upper reads), lanes the upper op
++    makes unknown, lanes it makes clean."""
++    i_bit = bool(u >> 31)
++    li = lower_info(0) if i_bit else lower_info(l)
++    kill_lower = 0
++    for r in li['vfw']:
++        kill_lower |= lanes(r)
++    kind, src, toacc, bc = classify(u)
++    dest = (u >> 21) & 0xF
++    ft, fd = (u >> 16) & 31, (u >> 6) & 31
++    m = REV4[dest]
++    uw = upper_info(u)[0]
++    kill_upper = set_upper = 0
++    if kind in ('add', 'sub', 'mul', 'madd', 'msub', 'max', 'mini') and not toacc and fd and dest:
++        set_upper = lanes(fd, m)
++    elif kind == 'itof' and ft and dest:
++        set_upper = lanes(ft, m)
++    else:
++        for r in uw:
++            kill_upper |= lanes(r)
++    return kill_lower, kill_upper, set_upper
++
++
++def apply_pair(st, effect):
++    kill_lower, kill_upper, set_upper = effect
++    st &= ~kill_lower
++    return ((st & ~kill_upper) | set_upper) & ALL_LANES
++
++
++def block_summary(pairs):
++    """(gen, keep): exit state = (entry & keep) | gen."""
++    top, bot = ALL_LANES, 0
++    for l, u in pairs:
++        e = pair_effect(l, u)
++        top, bot = apply_pair(top, e), apply_pair(bot, e)
++    return bot, top & ~bot & ALL_LANES
++
++
++def block_successors(pc0, pairs):
++    """Static successors of a block (pcs). JR / JALR targets and BAL return sites are dynamic: the runtime checks those
++    entries (VU1Interpreter::runNative)."""
++    n = len(pairs)
++    end_pc = (pc0 + 8 * n) & 0x3FFF
++    if n >= 2 and is_branch(*pairs[n - 2]):
++        l = pairs[n - 2][0]
++        op = l >> 25
++        bpc = pc0 + 8 * (n - 2)
++        tgt = (bpc + 8 + sx(l, 11) * 8) & 0x3FFF
++        if op in (0x20, 0x21):
++            return [tgt]
++        if op in (0x24, 0x25):
++            return []
++        return [tgt, end_pc]
++    if any((u >> 30) & 1 for (l, u) in pairs):
++        return []
++    return [end_pc]
++
++
++def emit_upper(u, pc, idx, mac_var, clip_var, prev_clip, st=0, from_entry=0, used=None):
+     kind, src, toacc, bc = classify(u)
+     dest = (u >> 21) & 0xF
+     ft, fs, fd = (u >> 16) & 31, (u >> 11) & 31, (u >> 6) & 31
+@@ -170,17 +246,25 @@ def emit_upper(u, pc, idx, mac_var, clip_var, prev_clip, clean=frozenset()):
+         return [f"vu1n::absOp<{m}>(s, {fs}, {ft});"] if ft else L
+     if kind in ('opmsub', 'opmula', 'other'):
+         return [f"VU1NativeAccess::callUpper(n, {pc}u, 0x{u:08x}u);"]
+-    def opnd(r):
+-        return f"vu1n::ld(s, {r})" if r == 0 or r in clean else f"vu1n::ldn(s, {r})"
+-    a = opnd(fs)
++    def opnd(r, need):
++        # need: the lanes of r the result depends on (DEST lanes, or the broadcast lane)
++        want = lanes(r, need)
++        if r == 0:
++            return f"vu1n::ld(s, {r})"
++        if st & want == want:
++            if used is not None:
++                used[0] |= want & from_entry
++            return f"vu1n::ld(s, {r})"
++        return f"vu1n::ldn(s, {r})"
++    a = opnd(fs, m)
+     if src == 'bc':
+-        b = f"vu1n::bc<{bc}>({opnd(ft)})"
++        b = f"vu1n::bc<{bc}>({opnd(ft, 1 << bc)})"
+     elif src == 'q':
+         b = "_mm_set1_ps(s.q)"
+     elif src == 'i':
+         b = "_mm_set1_ps(s.i)"
+     else:
+-        b = opnd(ft)
++        b = opnd(ft, m)
+     acc = "vu1n::ldAcc(s)"
+     if kind == 'add':
+         r = f"_mm_add_ps({a}, {b})"
+@@ -429,8 +513,10 @@ def emit_lower(l, pc, upper, bkp, mac_expr, clip_expr, clip_var):
+     return [f"VU1NativeAccess::callLower(n, {pc}u, 0x{l:08x}u, 0x{upper:08x}u);"]
+ 
+ 
+-def gen_block(pc0, pairs, tail_out=None):
++def gen_block(pc0, pairs, tail_out=None, entry=VF0_LANES, req_out=None):
+     """tail_out: list that receives the block's VU1TailDesc (mac pairs, mac masks, clip pairs) when it has one.
++    entry: VF lanes assumed clean on entry (clean-operand analysis); req_out: list that receives the lanes of `entry` the
++    code relies on (the runtime checks them when the executed path does not prove them, see runNative).
+     C++ body for a block, or None if the block uses something the native backend does not support."""
+     n = len(pairs)
+     infos = [lower_info(l) if not (u >> 31) else lower_info(0) for (l, u) in pairs]
+@@ -528,10 +614,13 @@ def gen_block(pc0, pairs, tail_out=None):
+         return out
+ 
+     lines = []
+-    clean_regs = set()          # vf registers known to hold normalised (finite) values: FMAC results of this block
++    st = entry | VF0_LANES      # VF lanes known clean (see pair_effect)
++    from_entry = st             # of those, the ones that come from the entry assumption (not written by this block)
++    used = [0]                  # entry lanes the code relies on (-> req_out)
+     for i, (l, u) in enumerate(pairs):
+         pc = pc0 + 8 * i
+-        clean_i = frozenset(clean_regs - infos[i]['vfw'])
++        effect = pair_effect(l, u)
++        st_i = st & ~effect[0]  # lanes the lower op writes are not trusted by the upper op of the same pair
+         li, (uw, ur, umac, uq) = infos[i], uinfo[i]
+         iBit = bool(u >> 31)
+         lower_first = False
+@@ -590,10 +679,12 @@ def gen_block(pc0, pairs, tail_out=None):
+                 lines.append(f"bool taken = {cond};")
+                 lines.append(f"uint32_t target = {tgt}u;")
+             # upper still executes in the branch pair
+-            lines.extend(emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), clean_i))
++            lines.extend(emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used))
++            st = apply_pair(st, effect)
++            from_entry &= ~(effect[0] | effect[1] | effect[2])
+             continue
+         # ordinary pair
+-        up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), clean_i)
++        up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used)
+         lo = [] if iBit else emit_lower(l, pc, u, None, mac_src(i), clip_src(i), f"c{i}")
+         if iBit:
+             lines.extend(up)
+@@ -606,10 +697,8 @@ def gen_block(pc0, pairs, tail_out=None):
+         else:
+             lines.extend(up)
+             lines.extend(lo)
+-        clean_regs = set(clean_i)
+-        kind_u = classify(u)[0]
+-        if kind_u in ('add', 'sub', 'mul', 'madd', 'msub', 'max', 'mini') and ((u >> 21) & 0xF) == 0xF and not classify(u)[2]:
+-            clean_regs |= {x for x in uw}
++        st = apply_pair(st, effect)
++        from_entry &= ~(effect[0] | effect[1] | effect[2])
+         # D/T halt bits
+         if (u >> 28) & 1:
+             lines.append("if (s.dBitEnabled) { " + " ".join(flush(i)) + f" s.stoppedByD = true; return kVu1nEnded | {(pc + 8) & 0x3FFF}u; }}")
+@@ -617,6 +706,8 @@ def gen_block(pc0, pairs, tail_out=None):
+             lines.append("if (s.tBitEnabled) { " + " ".join(flush(i)) + f" s.stoppedByT = true; return kVu1nEnded | {(pc + 8) & 0x3FFF}u; }}")
+     end_pc = (pc0 + 8 * n) & 0x3FFF
+     ebit = any((u >> 30) & 1 for (l, u) in pairs)
++    if req_out is not None:
++        req_out.append(used[0] & ~VF0_LANES)
+     lines.extend(flush_final(n - 1))
+     if last_is_branch_block:
+         lines.append(f"return taken ? target : {end_pc}u;")
+@@ -656,30 +747,63 @@ def main():
+             line = line.strip()
+             if line:
+                 extra.add(int(line, 16) & 0x3FF8)
+-    blocks = {}
+-    unsupported = 0
++    # Pass 1: the distinct blocks, and per micro-memory a forward fixpoint of the clean-operand state over its static
++    # control flow (meet = AND); a block's entry assumption is the AND over every image it appears in.
++    info = {}   # key -> (pc, pairs, gen, keep, successors)
++    entry = {}  # key -> VF lanes clean on entry along every static path seen
+     for f in inputs:
+         code = open(f, 'rb').read()
+         if len(code) != CODE_SIZE:
+             continue
++        nodes = {}
+         for pc in sorted(heads_of(code, extra)):
+             pairs = extent(code, pc)
+             if not pairs:
+                 continue
+-            words = [w for pr in pairs for w in pr]
+-            key = fnv_block(pc, words)
+-            if key in blocks:
+-                continue
+-            tail = []
+-            body = gen_block(pc, pairs, tail)
+-            blocks[key] = (pc, len(pairs), body, tail[0] if tail else None)
+-            if body is None:
+-                unsupported += 1
++            key = fnv_block(pc, [w for pr in pairs for w in pr])
++            if key not in info:
++                gen, keep = block_summary(pairs)
++                info[key] = (pc, pairs, gen, keep, block_successors(pc, pairs))
++            nodes[pc] = key
++        preds = {pc: [] for pc in nodes}
++        for pc, key in nodes.items():
++            for t in info[key][4]:
++                if t in preds:
++                    preds[t].append(pc)
++        state = {pc: (ALL_LANES if preds[pc] else VF0_LANES) for pc in nodes}
++        changed = True
++        while changed:
++            changed = False
++            for pc in nodes:
++                if not preds[pc]:
++                    continue
++                new = ALL_LANES
++                for p in preds[pc]:
++                    gen, keep = info[nodes[p]][2], info[nodes[p]][3]
++                    new &= (state[p] & keep) | gen
++                if new != state[pc]:
++                    state[pc] = new
++                    changed = True
++        for pc, key in nodes.items():
++            st = state[pc] if state[pc] != ALL_LANES else VF0_LANES  # only reached through cycles: assume nothing
++            entry[key] = entry.get(key, ALL_LANES) & st
++    # Pass 2: the code, each block compiled for its entry assumption
++    blocks = {}
++    unsupported = 0
++    assumed = 0
++    for key, (pc, pairs, gen, keep, _) in info.items():
++        tail, req = [], []
++        body = gen_block(pc, pairs, tail, entry.get(key, VF0_LANES), req)
++        blocks[key] = (pc, len(pairs), body, tail[0] if tail else None, req[0] if req else 0, gen, keep)
++        if body is None:
++            unsupported += 1
++        elif req and req[0]:
++            assumed += 1
+     os.makedirs(out, exist_ok=True)
+     texts = [[] for _ in range(parts)]
+     regs = [[] for _ in range(parts)]
+     count = 0
+-    for key, (pc, npairs, body, tail) in sorted(blocks.items()):
++    for key, (pc, npairs, body, tail, req, gen, keep) in sorted(blocks.items()):
+         if body is None:
+             continue
+         name = f"b{pc:04x}_{key & 0xFFFFFFFF:08x}"
+@@ -690,6 +814,9 @@ def main():
+             mp, mm, cp = (list(x) + [0] * (3 - len(x)) for x in tail)
+             t.append(f"static const VU1TailDesc {name}_tail = {{{len(tail[0])}, {len(tail[2])}, {{{mp[0]}, {mp[1]}, {mp[2]}}}, "
+                      f"{{{mm[0]}, {mm[1]}, {mm[2]}}}, {{{cp[0]}, {cp[1]}, {cp[2]}}}}};")
++        m64 = (1 << 64) - 1
++        t.append(f"static const VU1NativeLanes {name}_lanes = {{{{0x{req & m64:x}ull, 0x{req >> 64:x}ull}}, "
++                 f"{{0x{gen & m64:x}ull, 0x{gen >> 64:x}ull}}, {{0x{keep & m64:x}ull, 0x{keep >> 64:x}ull}}}};")
+         t += [f"static uint32_t {name}(VU1NativeCtx &n)", "{", "    VU1State &s = *n.s;"]
+         t += ["    " + ln for ln in body]
+         t += ["}", ""]
+@@ -697,7 +824,7 @@ def main():
+         # bit 16: the block reads flags written before it; only such blocks need exact entry timing (see runNative)
+         reads_entry = any("macAt(" in ln or "clipAt(" in ln for ln in body)
+         regs[part].append(f"    vu1nRegisterBlock(0x{key:016x}ull, {name}, {npairs | (0x10000 if reads_entry else 0)}u, "
+-                          f"{'&' + name + '_tail' if tail else 'nullptr'});")
++                          f"{'&' + name + '_tail' if tail else 'nullptr'}, &{name}_lanes);")
+     header = ('// Generated by tools/vu1/vu1n_gen.py from the game\'s VU1 microcode. Do not publish.\n'
+               '#include "runtime/ps2_vu1_native.h"\n#include <cmath>\n\n'
+               '#if defined(_MSC_VER)\n#pragma float_control(precise, on, push)\n#pragma fp_contract(off)\n#endif\n\n')
+@@ -708,7 +835,8 @@ def main():
+         old = open(path, encoding='utf-8').read() if os.path.exists(path) else None
+         if old != body:
+             open(path, 'w', encoding='utf-8').write(body)
+-    print(f"[vu1n_gen] {len(inputs)} images, {len(blocks)} distinct blocks, {count} generated, {unsupported} unsupported")
++    print(f"[vu1n_gen] {len(inputs)} images, {len(blocks)} distinct blocks, {count} generated, {unsupported} unsupported, "
++          f"{assumed} rely on clean operands on entry")
+ 
+ 
+ if __name__ == '__main__':
