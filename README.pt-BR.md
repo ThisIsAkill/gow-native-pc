@@ -113,4 +113,4 @@ GPL-3.0 — veja [`LICENSE`](LICENSE). Este projeto é derivado do PS2Recomp (ra
 (Waffle565), do god-of-war-recomp (KIexster) e do Tobiichi-Port (YYOzcan); a lista completa e o que veio de cada um
 está em [`CREDITS.md`](CREDITS.md). God of War é marca registrada da Sony Interactive Entertainment.
 
-Repositório: `https://github.com/<seu-usuario>/gow-native-pc`
+Repositório: `https://github.com/Vnnc1/gow-native-pc`
