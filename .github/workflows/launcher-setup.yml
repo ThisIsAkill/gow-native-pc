@@ -1,0 +1,44 @@
+# Builds the launcher and the release setup on Windows (tools/pipeline/build.ps1 stages launcher, package, installer):
+# no game files are involved. The setup and the release zip are kept as the run's artifact "gow-native-pc-setup".
+name: launcher and setup
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'launcher/**'
+      - 'installer/**'
+      - 'tools/**'
+      - 'engine/**'
+      - 'games/**'
+      - '.github/workflows/launcher-setup.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.12'
+      # Qt (about 1 GB through aqtinstall) and the portable tools, downloaded once per cache key
+      - uses: actions/cache@v4.2.3
+        with:
+          path: |
+            data/_tools/qt
+            data/_tools/mingit
+            data/_tools/python
+            data/_tools/cmake
+            data/_tools/ninja
+          key: tools-qt-6.8.3-${{ hashFiles('tools/pipeline/build.ps1') }}
+          restore-keys: tools-qt-6.8.3-
+      - name: launcher, package, installer
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\pipeline\build.ps1 -Stages launcher,package,installer
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: gow-native-pc-setup
+          path: |
+            data/_package/gow-native-pc-setup.exe
+            data/_package/gow-native-pc-windows.zip
+          if-no-files-found: error
