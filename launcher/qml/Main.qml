@@ -95,6 +95,7 @@ ApplicationWindow {
 
     function aspectoPorDefecto() {
         var r = pantalla.ancho / pantalla.alto
+        if (r >= 3.2) return "32:9"
         if (r >= 2.2) return "21:9"
         if (r >= 1.7) return "16:9"
         if (r >= 1.5) return "16:10"

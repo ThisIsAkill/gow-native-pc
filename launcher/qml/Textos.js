@@ -47,6 +47,7 @@ var tabla = {
     aspecto169: { tr: "16:9 geniş ekran", en: "16:9 widescreen", es: "16:9 panorámica", pt: "16:9 widescreen" },
     aspecto1610: { tr: "16:10 geniş ekran", en: "16:10 widescreen", es: "16:10 panorámica", pt: "16:10 widescreen" },
     aspecto219: { tr: "21:9 ultra geniş (deneysel)", en: "21:9 ultrawide (experimental)", es: "21:9 ultrapanorámica (experimental)", pt: "21:9 ultrawide (experimental)" },
+    aspecto329: { tr: "32:9 süper ultra geniş (deneysel)", en: "32:9 super ultrawide (experimental)", es: "32:9 súper ultrapanorámica (experimental)", pt: "32:9 super ultrawide (experimental)" },
     aspectoPantalla: { tr: "Ekranınız", en: "your display", es: "tu pantalla", pt: "seu monitor" },
     estirar: { tr: "Görüntüyü pencereye yay", en: "Stretch to window", es: "Estirar a la ventana", pt: "Esticar até a janela" },
     estirarDesc: { tr: "Siyah kenarlar olmaz ama oranlar bozulur.", en: "No black bars, but proportions are distorted.", es: "Sin bandas negras, pero se deforman las proporciones.", pt: "Sem barras pretas, mas as proporções ficam distorcidas." },

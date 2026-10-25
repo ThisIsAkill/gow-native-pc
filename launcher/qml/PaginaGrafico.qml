@@ -114,7 +114,8 @@ ScrollView {
                     { texto: Tema.t("aspecto43") + raiz.marcaPantalla(4 / 3), valor: "4:3" },
                     { texto: Tema.t("aspecto169") + raiz.marcaPantalla(16 / 9), valor: "16:9" },
                     { texto: Tema.t("aspecto1610") + raiz.marcaPantalla(16 / 10), valor: "16:10" },
-                    { texto: Tema.t("aspecto219") + raiz.marcaPantalla(21 / 9), valor: "21:9" }
+                    { texto: Tema.t("aspecto219") + raiz.marcaPantalla(21 / 9), valor: "21:9" },
+                    { texto: Tema.t("aspecto329") + raiz.marcaPantalla(32 / 9), valor: "32:9", detalle: "5120×1440, 3840×1080" }
                 ]
                 valor: raiz.ajustes.aspecto
                 onElegido: (v) => raiz.ajustes.aspecto = v
