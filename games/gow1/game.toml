@@ -37,8 +37,8 @@ movie_ext = ".PSS"
 seconds = 240
 pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadrado,44:triangulo,48:lup*3,52:x,55:cuadrado,56:triangulo,60:circulo,64:r1,70:lleft*2,74:cuadrado,76:cuadrado,80:triangulo,90:lup*4,96:x,100:cuadrado,104:l1,110:lright*2,120:cuadrado,125:triangulo,140:lup*5,150:cuadrado,160:triangulo,180:lup*5,200:cuadrado"
 
-# Known discs. kind = original (the game as released) | translation (fan translation: same code, translated data).
-# Unknown discs are still accepted when their .text matches text_sha1; their language is then guessed from the text.
+# Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
+# accepted as a translation, and its language is guessed from the words below.
 [[editions]]
 id = "usa"
 kind = "original"
@@ -46,19 +46,12 @@ language = "en"
 label = "English (USA)"
 elf_crc = "D6385328"
 
-[[editions]]
-id = "ptbr-romsportugues-t3"
-kind = "translation"
-language = "pt-BR"
-label = "Português (Brasil) — tradução de fãs (romsportugues T3.0)"
-elf_crc = "5444DDCB"
-notes = "Single-layer repack: no .PSW widescreen movies, other movies re-encoded; hides the WideScreen menu option."
-
-# words that identify a language in R_PERM.WAD / R_SHELL.WAD when the disc is not a known edition
+# menu sentences that identify a language in R_PERM.WAD / R_SHELL.WAD (text_files) of a translated disc (not single
+# words: names such as "Difficulty" are also internal identifiers, left untranslated)
 [language_hints]
-"pt-BR" = ["Novo Jogo", "Carregar", "Escolher", "Dificuldade"]
+"pt-BR" = ["Novo Jogo", "Aperte [XButton]", "Termine o jogo para desbloquear"]
 "es" = ["Nueva partida", "Cargar partida", "Dificultad"]
 "fr" = ["Nouvelle partie", "Charger", "Difficulté"]
 "de" = ["Neues Spiel", "Laden", "Schwierigkeit"]
 "it" = ["Nuova partita", "Carica", "Difficoltà"]
-"en" = ["New Game", "Load Game", "Difficulty"]
+"en" = ["New Game", "Press [XButton]", "Beat the game to unlock"]

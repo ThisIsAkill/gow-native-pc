@@ -19,6 +19,11 @@ import discfs  # noqa: E402
 import profile as profiles  # noqa: E402
 
 
+# launcher labels of guessed languages (a translation that is not a known edition)
+LANGUAGE_NAMES = {'pt-BR': 'Português (Brasil)', 'es': 'Español', 'fr': 'Français', 'de': 'Deutsch',
+                  'it': 'Italiano', 'en': 'English'}
+
+
 def guess_language(disc, prof, toc):
     hints = prof.get('language_hints', {})
     text = b''
@@ -68,8 +73,14 @@ def identify(path):
         out.update(edition=edition['id'], kind=edition['kind'], language=edition['language'], label=edition['label'])
     else:
         lang = guess_language(disc, prof, toc) if toc else None
-        out.update(edition='unknown-' + out['elf_crc'].lower(), kind='translation' if code_ok else 'unknown',
-                   language=lang or 'unknown', label=f'{lang or "unknown language"} (unrecognised disc {out["elf_crc"]})')
+        if code_ok and lang:
+            label = f'{LANGUAGE_NAMES.get(lang, lang)} — fan translation'
+            edition_id = f'translation-{lang.lower()}-{out["elf_crc"].lower()}'
+        else:
+            label = f'{lang or "unknown language"} (unrecognised disc {out["elf_crc"]})'
+            edition_id = 'unknown-' + out['elf_crc'].lower()
+        out.update(edition=edition_id, kind='translation' if code_ok else 'unknown', language=lang or 'unknown',
+                   label=label)
     wide = prof['disc'].get('widescreen_movie_ext')
     sizes = [e[3] for e in toc if wide and e[1].endswith(wide)]
     out['has_widescreen_movies'] = bool(sizes) and min(sizes) > 2048

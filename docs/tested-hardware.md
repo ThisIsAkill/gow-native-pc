@@ -29,8 +29,8 @@ Discs on machine A with the current configuration (clean build of this repositor
 
 | Disc (`data/gow1/discs/`) | Result |
 |---|---|
-| USA + PT-BR translation (`ptbr-romsportugues-t3-full`) | Portuguese menus and texts, 58-60 fps, window 120 Hz |
-| PT-BR translation ISO only (`ptbr-romsportugues-t3`, standalone) | Portuguese title menu, gameplay reached, image correct |
+| USA + a PT-BR fan translation (full) | Portuguese menus and texts, 58-60 fps, window 120 Hz |
+| PT-BR fan translation ISO only (standalone) | Portuguese title menu, gameplay reached, image correct |
 
 Other findings on machine A: fullscreen start crashed (0xC0000005) until `engine/patches/03`; without `IOP_MOD/` the
 game waited on the legal screen forever (handled by `tools/disc/prepare.py`).

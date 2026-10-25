@@ -20,7 +20,7 @@ Normalisation of a standalone disc (`prepare.py normalise`): the IRX modules cop
 repack without `PART2.PAK` gets its TOC part-1 entries pointed at their part-0 copies; empty widescreen movies
 (`.PSW` ≤ 1 sector) point at the 4:3 ones (`.PSS`, shown stretched in 16:9).
 
-Both the standalone and the full PT-BR discs were tested to gameplay (see `docs/tested-hardware.md`).
+A Brazilian Portuguese fan translation was tested to gameplay both standalone and full (see `docs/tested-hardware.md`).
 
 When more than one language is prepared, the launcher asks once which one to play; **Other → Game text** changes it.
 All languages share one memory card (`data/<id>/mc0`).
@@ -30,9 +30,10 @@ All languages share one memory card (`data/<id>/mc0`).
 | Edition | ELF CRC | Notes |
 |---|---|---|
 | USA original (SCUS-97399) | D6385328 | |
-| Português (Brasil), romsportugues T3.0 (DVD5) | 5444DDCB | Same code. Translates `R_PERM.WAD`, `R_SHELL.WAD` and ten menu strings in the ELF (difficulties, months, "Vazio"). Single-layer repack: no `.PSW` movies, others re-encoded, WideScreen option hidden. |
 
-Add an edition: run `identify.py` on the ISO, copy its `elf_crc`, add an `[[editions]]` entry with `kind`, `language`
+Fan translations are not listed by name: a disc with the original code is accepted as a translation, its language is
+guessed from `[language_hints]` and the launcher shows it as "<language> — fan translation". To give one a fixed label,
+run `identify.py` on the ISO and add an `[[editions]]` entry with its `elf_crc`, `kind = "translation"`, `language`
 (BCP 47, e.g. `es`, `pt-BR`) and `label`.
 
 ## Not supported
