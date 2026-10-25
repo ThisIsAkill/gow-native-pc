@@ -468,7 +468,7 @@ ApplicationWindow {
                         }
                     }
                     Text {
-                        text: "v" + Qt.application.version + " · Tobiichi-Port · PS2Recomp"
+                        text: "v" + Qt.application.version
                         color: Tema.textoTenue
                         font.pixelSize: 11
                         Layout.fillWidth: true
