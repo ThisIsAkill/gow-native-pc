@@ -1,0 +1,27 @@
+Rebuild after the VU1 recording: only the VU1 code (src/lib/vu include folder on the generated files, not the target).
+- ps2xRuntime/CMakeLists.txt: the generated VU1 code (vu1_generado/programa*.cpp) needs src/lib/vu for
+  ps2_vu1_compiled.inl. It was added with target_include_directories(ps2EntryRunner ...), which changes the compile command
+  of every game unit, so the first build with recorded microcode (the optimize/native stages of a new install) recompiled
+  the whole game (~959 steps) instead of the VU1 code. Now it is a source property of those files only.
+Checked with a CMake/Ninja test project: target include folder -> every object rebuilt; source property -> only the
+generated file. A build folder made before this patch rebuilds once (the command lines lose the folder).
+
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+index 1e7067d..829fa1f 100644
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -588,10 +588,12 @@ if(PS2X_VU1_MICROCODE_DIR AND PS2X_VU1_GENERATOR_SOURCE AND NOT PS2X_IS_ANDROID
+             DEPENDS ps2x_vu1_generator ${PS2X_VU1_IMAGES}
+             VERBATIM)
+         target_sources(ps2EntryRunner PRIVATE ${PS2X_VU1_GENERATED_PARTS})
++        # gow-native-pc: the include folder on the generated files only. On the target it changed the command line of
++        # every game unit, so the first build with recorded microcode recompiled the whole game instead of the VU1 code.
+         set_source_files_properties(${PS2X_VU1_GENERATED_PARTS} PROPERTIES
+             SKIP_UNITY_BUILD_INCLUSION ON
+-            SKIP_PRECOMPILE_HEADERS ON)
+-        target_include_directories(ps2EntryRunner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu")
++            SKIP_PRECOMPILE_HEADERS ON
++            INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu")
+         if(MSVC)
+             set_source_files_properties(${PS2X_VU1_GENERATED_PARTS} PROPERTIES COMPILE_OPTIONS "/bigobj")
+         endif()

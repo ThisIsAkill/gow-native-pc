@@ -1,0 +1,26 @@
+Hidden game window for the pipeline's recording runs (GOW_WINDOW_HIDDEN).
+- gow_integracion.cpp: GOW_WINDOW_HIDDEN=1 adds raylib's FLAG_WINDOW_HIDDEN when the window opens (and skips fullscreen).
+  The game, the GS renderer and the GPU run as usual, so the recorded VU1 microcode and the shader cache are the same as
+  with a visible window; nothing shows on the desktop and no keyboard input can reach the game.
+tools/pipeline/build.ps1 sets it in the optimize and pgo stages while the launcher shows its install screen. Without the
+variable nothing changes.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+index 86a0a5a..72ba0f9 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -328,8 +328,12 @@ void gowVentanaAbrir(const char *title)
+                 width = w, height = h;
+         }
+     const char *mode = std::getenv("TOBIICHI_PANTALLA");
+-    const bool fullscreen = mode && std::strcmp(mode, "completa") == 0;
+-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | (envFlag("TOBIICHI_VSYNC", false) ? FLAG_VSYNC_HINT : 0u));
++    // gow-native-pc: GOW_WINDOW_HIDDEN=1 (the pipeline's recording runs) opens the window hidden: the game and the GPU
++    // run and draw as usual (shaders still get compiled into the cache), but nothing shows and no key reaches it
++    const bool hidden = envFlag("GOW_WINDOW_HIDDEN", false);
++    const bool fullscreen = !hidden && mode && std::strcmp(mode, "completa") == 0;
++    SetConfigFlags(FLAG_WINDOW_RESIZABLE | (envFlag("TOBIICHI_VSYNC", false) ? FLAG_VSYNC_HINT : 0u) |
++                   (hidden ? FLAG_WINDOW_HIDDEN : 0u));
+     const char *customTitle = std::getenv("TOBIICHI_TITULO");
+     InitWindow(width, height, customTitle && *customTitle ? customTitle : title);
+     // GOW-Port: GLFW pone LC_CTYPE del sistema. Con tr_TR, tolower('I') es 'I' y toupper('i') es 'i': fallaban las

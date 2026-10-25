@@ -11,8 +11,8 @@
 #   build      ps2EntryRunner (log: data/<game>/logs/build.log)
 #   pgo        clang only: an instrumented build plays the [optimize] pad script, its profile goes to
 #              data/<game>/pgo/gow.profdata, and the game is rebuilt with it (profile-guided optimisation)
-#   optimize   the game plays itself (profile [optimize]: pad script, seconds) recording the VU1 microcode and IOP
-#              modules it uses, then "native"
+#   optimize   the game plays itself (profile [optimize]: pad script, seconds), hidden and muted (engine/patches/15), recording
+#              the VU1 microcode and IOP modules it uses, then "native" (only the VU1 / IOP code is rebuilt: patch 16)
 #   native     the recorded VU1 microcode and IOP modules compiled into the game (the launcher records new microcode
 #              while you play, so this makes visited areas faster); configure + build
 #   launcher   the Qt launcher from launcher/ into launcher/build (Qt 6 downloaded once into data/_tools), plus the
@@ -218,6 +218,39 @@ function Use-Clang {
     $script:clangReady = $true
 }
 function Use-Toolchain { if ($Toolchain -eq 'clang') { Use-Clang } else { Use-Msvc } }
+# Asks the game to close the way its window's close button does (WM_CLOSE to its GLFW window), which also works while the
+# window is hidden (GOW_WINDOW_HIDDEN, engine/patches/15): Process.CloseMainWindow only finds visible windows. Returns the
+# number of windows asked.
+function Close-GameWindow([int]$procId) {
+    if (-not ('GowWindows' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class GowWindows {
+    delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int size);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+    public static int Close(uint pid) {
+        int asked = 0;
+        EnumWindows(delegate (IntPtr hwnd, IntPtr lParam) {
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
+            var name = new StringBuilder(64);
+            GetClassName(hwnd, name, name.Capacity);
+            // GLFW30 = the game window (GLFW's helper window has another class)
+            if (owner == pid && name.ToString() == "GLFW30") { PostMessage(hwnd, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero); asked++; }
+            return true;
+        }, IntPtr.Zero);
+        return asked;
+    }
+}
+'@
+    }
+    return [GowWindows]::Close([uint32]$procId)
+}
 function Languages {
     $f = Join-Path $data 'languages.json'
     if (-not (Test-Path $f)) { throw 'no prepared disc: run the "discs" stage with your ISO' }
@@ -424,8 +457,10 @@ if ($Stages -contains 'build') {
 
 # --- pgo: profile-guided optimisation (clang) -----------------------------------------------------------------------
 # An instrumented copy of the game (its own build folder) plays the [optimize] pad script with the hardware renderer and
-# sound, like a player; closing its window writes the profile (engine/patches/12), which is merged into gow.profdata and
-# used by every later clang build. A new recompile leaves it partly stale (those functions are just not profiled).
+# the sound path running, like a player, but hidden and silent (GOW_WINDOW_HIDDEN, engine/patches/15; GOW_AUDIO=0 with
+# GOW_AUDIO_PCM=NUL keeps the audio stream paced at volume 0); closing its window writes the profile (engine/patches/12),
+# which is merged into gow.profdata and used by every later clang build. A new recompile leaves it partly stale (those
+# functions are just not profiled).
 if ($Stages -contains 'pgo') {
     if ($Toolchain -ne 'clang') { throw 'the pgo stage needs -Toolchain clang' }
     $genBld = "$bld-pgogen"
@@ -433,19 +468,19 @@ if ($Stages -contains 'pgo') {
     Configure $genBld 'generate'
     Build-Game $genBld
     $secs = if ($Seconds -gt 0) { $Seconds } else { [int]$prof.optimize.seconds }
-    Step "profile-guided optimisation: the game plays itself for $secs s (do not touch the keyboard or the game window)"
+    Step "profile-guided optimisation: the game plays itself for $secs s (hidden, in the background)"
     $elf = (Languages).recompile_elf
     New-Item -ItemType Directory -Force $pgoDir | Out-Null
     Get-ChildItem $pgoDir -Filter '*.profraw' -ErrorAction SilentlyContinue | Remove-Item
     $vars = @{ LLVM_PROFILE_FILE = (Join-Path $pgoDir 'run-%p.profraw'); GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_PAD_TEST_NO_CAPTURE = '1'
-               PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'; GOW_AUDIO_DEVICE = 'default'
-               GOW_PAD_GUION = $prof.optimize.pad_script }
+               PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'; GOW_WINDOW_HIDDEN = '1'
+               GOW_AUDIO = '0'; GOW_AUDIO_PCM = 'NUL'; GOW_PAD_GUION = $prof.optimize.pad_script }
     if (Get-ChildItem -Path $vu1 -Filter *.bin -ErrorAction SilentlyContinue | Select-Object -First 1) { $vars.GOW_VU1_CAPTURA = $vu1 }
     foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
     $p = Start-Process -FilePath (Join-Path $genBld 'ps2xRuntime\ps2EntryRunner.exe') -ArgumentList "`"$elf`"" -WorkingDirectory $logs -PassThru
     try { $p.PriorityClass = 'Normal' } catch { }
     for ($t = 0; $t -lt $secs -and -not $p.HasExited; $t += 5) { Start-Sleep 5; Write-Host "@@progress $([math]::Min($t + 5, $secs)) $secs" }
-    if (-not $p.HasExited) { $null = $p.CloseMainWindow(); $null = $p.WaitForExit(60000) }   # the profile is written on close
+    if (-not $p.HasExited) { $null = Close-GameWindow $p.Id; $null = $p.WaitForExit(60000) }   # the profile is written on close
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     foreach ($k in $vars.Keys) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
     $raw = @(Get-ChildItem $pgoDir -Filter '*.profraw' | Where-Object Length -gt 0)
@@ -461,15 +496,16 @@ if ($Stages -contains 'pgo') {
 # --- optimize / native ----------------------------------------------------------------------------------------------
 if ($Stages -contains 'optimize') {
     $secs = if ($Seconds -gt 0) { $Seconds } else { [int]$prof.optimize.seconds }
-    Step "record: the game plays itself for $secs s (do not touch the keyboard or the game window)"
+    Step "record: the game plays itself for $secs s (hidden, in the background)"
     Need $runnerExe 'built game (run the build stage)'
     $elf = (Languages).recompile_elf
     New-Item -ItemType Directory -Force $vu1, $iopMods | Out-Null
     # the hardware renderer as the player has it: with PS2X_GS_SHADER_CACHE_DIR (the launcher passes its own) the shaders
-    # compiled here are already in the cache at the first play
+    # compiled here are already in the cache at the first play. The window stays hidden (engine/patches/15): the GPU
+    # draws as usual, nothing shows on the desktop and no key can reach the game
     $vars = @{ GOW_VU1_CAPTURA = $vu1; PS2X_IOP_DUMP_MODULES = $iopMods; GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_AUDIO = '0'
                GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'
-               GOW_PAD_GUION = $prof.optimize.pad_script }
+               GOW_WINDOW_HIDDEN = '1'; GOW_PAD_GUION = $prof.optimize.pad_script }
     foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
     # nothing left from the build (mspdbsrv, vctip, a stray cl.exe) may compete with the game for the 4 minutes
     Get-Process -Name mspdbsrv, vctip, cl, link -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
