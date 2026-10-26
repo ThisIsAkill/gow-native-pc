@@ -137,19 +137,21 @@ $iopMods = Join-Path $data 'iop_modules'
 # copy (a development checkout, a second installation) already configured it: CMake refuses a cache made from another
 # source folder, so this copy then takes C:\gow-build-<hash of its folder>.
 $buildRootFile = Join-Path $root 'data\build-root.txt'
+$md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
+$ownRoot = 'C:\gow-build-' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+# a build folder configured from another copy's runtime (CMake refuses its cache)
+function Test-ForeignCache([string]$folder) {
+    $cache = Join-Path $folder 'CMakeCache.txt'
+    if (-not (Test-Path $cache)) { return $false }
+    $home_ = [regex]::Match((Get-Content $cache -Raw), '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Groups[1].Value.Trim()
+    return -not $home_.StartsWith((Barra $rt), [StringComparison]::OrdinalIgnoreCase)
+}
 if (-not $BuildRoot -and (Test-Path $buildRootFile)) { $BuildRoot = (Get-Content $buildRootFile -Raw).Trim() }
 if (-not $BuildRoot) {
     $BuildRoot = 'C:\gow-build'
     # every folder of the root (MSVC, clang, dev configuration) must be this copy's or unused
     foreach ($folder in @($BuildRoot, "$BuildRoot-clang", "$BuildRoot-dev", "$BuildRoot-clang-pgogen")) {
-        $cache = Join-Path $folder 'CMakeCache.txt'
-        if (-not (Test-Path $cache)) { continue }
-        $home_ = [regex]::Match((Get-Content $cache -Raw), '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Groups[1].Value.Trim()
-        if (-not $home_.StartsWith((Barra $rt), [StringComparison]::OrdinalIgnoreCase)) {
-            $md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
-            $BuildRoot = 'C:\gow-build-' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
-            break
-        }
+        if (Test-ForeignCache $folder) { $BuildRoot = $ownRoot; break }
     }
     New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
     [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
@@ -161,6 +163,15 @@ if ($Toolchain -notin @('msvc', 'clang')) { $Toolchain = 'clang' }
 [IO.File]::WriteAllText($toolchainFile, $Toolchain)
 $bld = if ($Config -eq 'Release') { $BuildRoot } else { "$BuildRoot-dev" }   # Ninja is single-config: one folder each
 if ($Toolchain -eq 'clang') { $bld += '-clang' }   # CMake cannot change the compiler of a configured folder
+# The recorded root can since have been taken by another copy (a test checkout configured C:\gow-build-clang): this copy
+# moves to its own root, where the next build starts from scratch (a full build)
+if ((Test-ForeignCache $bld) -or (Test-ForeignCache "$bld-pgogen")) {
+    if ($BuildRoot -eq $ownRoot) { throw "$bld was configured from another copy of the project: delete that folder and run again" }
+    Write-Host "build folder $bld belongs to another copy of the project: this copy now uses $ownRoot (the next build is a full one)"
+    $bld = $bld.Replace($BuildRoot, $ownRoot)
+    $BuildRoot = $ownRoot
+    [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
+}
 $pgoDir = Join-Path $root "data\$Game\pgo"
 $pgoProfile = Join-Path $pgoDir 'gow.profdata'
 $runnerExe = Join-Path $bld 'ps2xRuntime\ps2EntryRunner.exe'
