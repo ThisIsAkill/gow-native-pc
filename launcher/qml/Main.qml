@@ -61,6 +61,7 @@ ApplicationWindow {
         property string portada: ""
         property string teclas: "" // key map as JSON (empty = default layout)
         property string mando: "" // controller layout as JSON (empty = the fixed layout of controlesDmc5)
+        property bool compilarAreas: false // background VU1 compiler while playing (GOW_VU1N_JIT, experimental)
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
         property string textoJuego: "" // game language: a "language" of installer.languages() (e.g. "en", "pt-BR"); empty = ask
         property real portadaFoco: 0.55
@@ -213,6 +214,9 @@ ApplicationWindow {
             elf: elegido.elf, iso: "", ejecutable: ejecutableJuego,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
             capturaVu1: installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
+            // experimental: VU1 code met without native code is compiled in the background while playing (vu1_jit.json,
+            // written by clang builds)
+            datosJit: ajustes.compilarAreas ? installer.repoRoot + "/data/" + installer.gameId : "",
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,

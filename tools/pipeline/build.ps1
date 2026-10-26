@@ -4,6 +4,8 @@
 #              downloaded once and checked against its SHA-256); every other stage also fetches what it needs
 #   fetch      engine/runtime: clone engine/runtime.toml's repository at its commit, apply engine/patches/*.patch
 #   discs      -Discs "<iso>|<iso>": tools/disc/prepare.py -> data/<game>/discs/*, languages.json, one memory card
+#   vu1disc    experimental: the VU1 microcode of every level read from the prepared disc (tools/disc/vu1_from_disc.py)
+#              into data/<game>/vu1_capture, so the next configure + build compiles it without playing (run "native")
 #   configure  CMake + Ninja in -BuildRoot (a short path: the runtime's dependencies exceed MAX_PATH in long folders),
 #              with the recorded VU1 microcode (data/<game>/vu1_capture) when there is some
 #   recomp     ps2_recomp: the profile's executable (languages.json: recompile_elf) -> C++ (data/<game>/recomp)
@@ -325,6 +327,16 @@ if ($Stages -contains 'discs') {
     Native $python (@('-I', (Join-Path $root 'tools\disc\prepare.py'), '--game', $Game, '--data', (Join-Path $root 'data')) + $list) 'disc preparation'
 }
 
+# --- vu1disc: VU1 microcode from the disc (experimental) -------------------------------------------------------------
+if ($Stages -contains 'vu1disc') {
+    Step 'VU1 microcode from the disc'
+    $genPy = Join-Path $rt $prof.runtime.vu1_native_generator
+    Need $genPy 'runtime (run the fetch stage)'
+    $discDir = Split-Path (Languages).recompile_elf
+    New-Item -ItemType Directory -Force $vu1 | Out-Null
+    Native $python @('-I', (Join-Path $root 'tools\disc\vu1_from_disc.py'), '--game', $Game, '--gen', $genPy, $discDir, $vu1) 'VU1 microcode from the disc'
+}
+
 # --- configure ------------------------------------------------------------------------------------------------------
 function Configure([string]$dir = $bld, [string]$pgo = 'auto') {
     Use-Toolchain
@@ -447,6 +459,14 @@ function Build-Game([string]$dir = $bld) {
     $ErrorActionPreference = 'Stop'
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
     Write-Host "OK: $(Join-Path $dir 'ps2xRuntime\ps2EntryRunner.exe')"
+    # the background VU1 compiler (launcher: "Compile new areas while playing") builds modules with this compiler and the
+    # build's flags; clang only (an MSVC game has another C++ library layout than llvm-mingw modules)
+    if ($Toolchain -eq 'clang' -and $dir -eq $bld) {
+        $jit = [ordered]@{ cxx = (Join-Path $script:llvmBin 'clang++.exe'); python = $python
+                           generator = (Join-Path $rt $prof.runtime.vu1_native_generator)
+                           flags = "-O3 -DNDEBUG -std=gnu++20 -march=native -ffp-contract=off -fno-strict-aliasing -fwrapv -I`"$(Barra (Join-Path $rec 'ps2xRuntime\include'))`"" }
+        [IO.File]::WriteAllText((Join-Path $data 'vu1_jit.json'), ($jit | ConvertTo-Json))
+    }
 }
 if ($Stages -contains 'build') {
     Step "build the game ($Config, $Toolchain)"

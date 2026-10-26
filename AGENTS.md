@@ -19,6 +19,8 @@ tools/disc/discfs.py        ISO / extracted folder / TOC / ELF helpers (format n
 tools/disc/identify.py      ISO -> {game, edition, language, compatible, problems} (JSON)
 tools/disc/prepare.py       ISOs -> data/<id>/discs/*, languages.json, shared mc0 (see its docstring)
 tools/disc/iso_extract.py   ISO9660 extractor (Waffle565), writes .disc_layout/.disc_meta
+tools/disc/vu1_from_disc.py VU1 microcode (VIF MPG uploads) of the ELF and every TOC file -> micro-memory images for the
+                            native VU1 build (stage vu1disc, experimental); vu1_from_disc_test.py = synthetic test
 engine/runtime.toml         runtime repository + commit
 engine/patches/NN-*.patch   changes to the runtime; header lines = what and why (git apply ignores them)
 launcher/                   Qt 6 launcher (from the Tobiichi Launcher). src/lanzador.* = play side (Tobiichi's, Spanish
@@ -52,6 +54,8 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16).
+  GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (background VU1 compiler, engine/patches/17, experimental: from
+  data/<id>/vu1_jit.json, which clang builds write; modules in data/<id>/vu1_jit).
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
 - **Step texts** of build.ps1 (`=== record: ...`, `=== build the game ...`, ...) are matched by prefix in

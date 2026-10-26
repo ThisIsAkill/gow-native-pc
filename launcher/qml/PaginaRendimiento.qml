@@ -47,10 +47,18 @@ ScrollView {
         Fila {
             titulo: Tema.t("mostrarFps")
             descripcion: Tema.t("mostrarFpsDesc")
-            separador: false
             Interruptor {
                 checked: raiz.ajustes.mostrarFps
                 onToggled: raiz.ajustes.mostrarFps = checked
+            }
+        }
+        Fila {
+            titulo: Tema.t("compilarAreas")
+            descripcion: Tema.t("compilarAreasDesc")
+            separador: false
+            Interruptor {
+                checked: raiz.ajustes.compilarAreas
+                onToggled: raiz.ajustes.compilarAreas = checked
             }
         }
 

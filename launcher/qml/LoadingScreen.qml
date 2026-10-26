@@ -26,14 +26,16 @@ Item {
         build: [{ id: "build", w: 12 }],
         pgo: [{ id: "pgoBuild", w: 12 }, { id: "pgoPlay", w: 4, fixed: true }, { id: "pgoRebuild", w: 12 }],
         optimize: [{ id: "record", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
-        native: [{ id: "native", w: 0.5 }, { id: "rebuild", w: 2 }]
+        native: [{ id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
+        vu1disc: [{ id: "vu1disc", w: 3 }]
     })
     // the step of a "=== <step> ===" line (the texts build.ps1 writes)
     function pasoDe(s) {
         var map = [["build tools", "tools"], ["runtime", "fetch"], ["discs", "discs"], ["configure", "configure"],
                    ["recompile the executable", "recomp"], ["generated code", "sync"], ["build the game", "build"],
                    ["profile-guided optimisation: instrumented", "pgoBuild"], ["profile-guided optimisation: the game", "pgoPlay"],
-                   ["rebuild with the profile", "pgoRebuild"], ["record", "record"], ["native VU1", "native"], ["rebuild", "rebuild"]]
+                   ["rebuild with the profile", "pgoRebuild"], ["record", "record"], ["native VU1", "native"], ["rebuild", "rebuild"],
+                   ["VU1 microcode from the disc", "vu1disc"]]
         for (var i = 0; i < map.length; ++i)
             if (s.indexOf(map[i][0]) === 0) return map[i][1]
         return ""
@@ -42,7 +44,7 @@ Item {
         var map = { tools: "instStepTools", fetch: "instStepRuntime", discs: "instStepDiscs", configure: "instStepConfigure",
                     recomp: "instStepRecomp", sync: "instStepSync", build: "instStepBuild", pgoBuild: "instStepPgo",
                     pgoPlay: "cargaPasoGrabar", pgoRebuild: "instStepPgo", record: "cargaPasoGrabar", native: "instStepNative",
-                    rebuild: "cargaPasoFinal" }
+                    rebuild: "cargaPasoFinal", vu1disc: "instStepVu1Disc" }
         return map[id] ? Tema.t(map[id]) : ""
     }
     function planDe(stages) {
@@ -58,7 +60,7 @@ Item {
     }
     // a run that takes long enough to deserve the screen (not "tools" or "tools,fetch" alone)
     function esLarga(stages) {
-        return /(^|,)(recomp|build|optimize|native|pgo)(,|$)/.test(stages)
+        return /(^|,)(recomp|build|optimize|native|pgo|vu1disc)(,|$)/.test(stages)
     }
 
     // ------------------------------------------------------------------------------------------------ state

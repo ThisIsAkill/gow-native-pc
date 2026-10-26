@@ -9,6 +9,8 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QImageReader>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcessEnvironment>
 #include <QScreen>
 #include <QSettings>
@@ -402,6 +404,25 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.insert(QStringLiteral("GOW_VU1_CAPTURA"), capturaVu1);
     else
         entorno.remove(QStringLiteral("GOW_VU1_CAPTURA"));
+    // gow-native-pc: background VU1 compiler (experimental, ps2_vu1_jit.inl): <data>/vu1_jit.json, written by clang builds
+    // (tools/pipeline/build.ps1), names the compiler, Python, the generator and the build's flags; modules go to
+    // <data>/vu1_jit. Without the file (MSVC build: other C++ library layout) it stays off.
+    {
+        const QString datosJit = a.value(QStringLiteral("datosJit")).toString();
+        QFile f(datosJit + QStringLiteral("/vu1_jit.json"));
+        const QJsonObject jit = !datosJit.isEmpty() && f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject();
+        if (!jit.isEmpty() && QDir().mkpath(datosJit + QStringLiteral("/vu1_jit")))
+        {
+            entorno.insert(QStringLiteral("GOW_VU1N_JIT"), datosJit + QStringLiteral("/vu1_jit"));
+            entorno.insert(QStringLiteral("GOW_VU1N_JIT_CXX"), jit.value(QStringLiteral("cxx")).toString());
+            entorno.insert(QStringLiteral("GOW_VU1N_JIT_PY"), jit.value(QStringLiteral("python")).toString());
+            entorno.insert(QStringLiteral("GOW_VU1N_JIT_GEN"), jit.value(QStringLiteral("generator")).toString());
+            entorno.insert(QStringLiteral("GOW_VU1N_JIT_FLAGS"), jit.value(QStringLiteral("flags")).toString());
+        }
+        else
+            for (const char *v : {"GOW_VU1N_JIT", "GOW_VU1N_JIT_CXX", "GOW_VU1N_JIT_PY", "GOW_VU1N_JIT_GEN", "GOW_VU1N_JIT_FLAGS"})
+                entorno.remove(QString::fromLatin1(v));
+    }
     // Window.
     const bool completa = a.value(QStringLiteral("modoPantalla")).toString() == QStringLiteral("completa");
     entorno.insert(QStringLiteral("TOBIICHI_PANTALLA"), completa ? QStringLiteral("completa") : QStringLiteral("ventana"));

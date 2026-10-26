@@ -63,7 +63,7 @@ ScrollView {
         var map = [["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
                    ["configure", "instStepConfigure"], ["recompile", "instStepRecomp"], ["generated code", "instStepSync"],
                    ["build the game", "instStepBuild"], ["record", "instStepRecord"], ["native VU1", "instStepNative"],
-                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"]]
+                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"], ["VU1 microcode from the disc", "instStepVu1Disc"]]
         for (var i = 0; i < map.length; ++i)
             if (s.indexOf(map[i][0]) === 0 || s.indexOf(map[i][0]) > 0) return Tema.t(map[i][1])
         return s
@@ -394,6 +394,11 @@ ScrollView {
                 titulo: Tema.t("instQuick")
                 descripcion: Tema.t("instQuickDesc")
                 BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("sync,build") }
+            }
+            Fila {
+                titulo: Tema.t("instVu1Disc")
+                descripcion: Tema.t("instVu1DiscDesc")
+                BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("vu1disc,native") }
             }
             Fila {
                 titulo: Tema.t("instPgo")
