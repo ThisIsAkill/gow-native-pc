@@ -147,6 +147,30 @@ QVariantMap InstallerBackend::environment() const
     };
 }
 
+QString InstallerBackend::diagnosticsFramePc() const
+{
+    // A line scan is enough for this one key: game.toml is written by hand, `frame_pc = "0x..."` under [diagnostics].
+    QFile file(m_root + QStringLiteral("/games/") + m_game + QStringLiteral("/game.toml"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
+    bool inSection = false;
+    for (const QByteArray &raw : file.readAll().split('\n'))
+    {
+        const QString line = QString::fromUtf8(raw).section(QLatin1Char('#'), 0, 0).trimmed();
+        if (line.startsWith(QLatin1Char('[')))
+            inSection = line == QStringLiteral("[diagnostics]");
+        else if (inSection && line.section(QLatin1Char('='), 0, 0).trimmed() == QStringLiteral("frame_pc"))
+        {
+            QString value = line.section(QLatin1Char('='), 1).trimmed();
+            value.remove(QLatin1Char('"'));
+            bool ok = false;
+            value.toUInt(&ok, 0);
+            return ok ? value : QString();
+        }
+    }
+    return {};
+}
+
 void InstallerBackend::openRunnerFolder() const
 {
     const QString runner = runnerPath();

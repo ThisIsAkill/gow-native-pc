@@ -33,3 +33,4 @@
 | 23-iop-stable-output | Preserve byte-identical IOP output timestamps during native maintenance, avoiding unnecessary module recompilation | this project |
 | 24-audio-mix-overflow | Widen master-volume multiplication before saturation in both SPU2 mixer paths; loud positive/negative multi-voice regression | this project |
 | 25-standalone-boot-profile | Direct runner launch uses its per-build disc/settings profile; explicit ELF arguments still win | this project |
+| 26-saves-tab-capture-dedupe | F1 > Saves: copies the memory card (`GOW_MC0`) to `GOW_SAVES_DIR/<date>-<time>/` for the launcher's Saves tab (no savestates: the copy holds the game's last altar save, docs/saves.md). `GOW_VU1_CAPTURE_MISSES` writes one `miss_<image hash>.bin` per micro-memory image instead of one `block_<key>.bin` per missing block. `[gow-pad2] read` lines only with `GOW_PAD_LOG`; the DMA SPR-flag warning skips cnt/ret/end tags, which never read ADDR | this project |

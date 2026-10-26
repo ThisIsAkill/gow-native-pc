@@ -35,6 +35,8 @@ public:
 
     // {tools, buildTools, runtime, game, discs: bool; runtimeDir, runner, dataDir: string}
     Q_INVOKABLE QVariantMap environment() const;
+    // [diagnostics].frame_pc of games/<id>/game.toml (GOW_PERF_FRAME_PC with the diagnostics toggle), empty when absent
+    Q_INVOKABLE QString diagnosticsFramePc() const;
     // the compiled game (empty when not built yet)
     Q_INVOKABLE QString runnerPath() const;
     Q_INVOKABLE void openRunnerFolder() const;

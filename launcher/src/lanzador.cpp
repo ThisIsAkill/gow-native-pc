@@ -9,6 +9,8 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QImageReader>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcessEnvironment>
 #include <QScreen>
 #include <QSettings>
@@ -486,6 +488,20 @@ bool Lanzador::iniciar(const QVariantMap &a)
         for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"),
                                    QStringLiteral("GOW_VU1N_DIAG"), QStringLiteral("GOW_PERF_DIAG")})
             entorno.insert(key, QStringLiteral("1"));
+    // The frame-loop pc of the profile ([diagnostics].frame_pc in games/<id>/game.toml), for the frame timings of
+    // GOW_PERF_DIAG; tools/test/jit-smoke.ps1 passes the same value.
+    const QString framePc = a.value(QStringLiteral("framePc")).toString();
+    if (a.value(QStringLiteral("diagnostics"), false).toBool() && !framePc.isEmpty())
+        entorno.insert(QStringLiteral("GOW_PERF_FRAME_PC"), framePc);
+    // Saves (F1 > Saves in game copies the card here; the Saves page restores them). The card path is set explicitly so
+    // the game and the launcher always agree on it.
+    const QString partidas = a.value(QStringLiteral("partidas")).toString();
+    if (!partidas.isEmpty() && QDir().mkpath(partidas))
+        entorno.insert(QStringLiteral("GOW_SAVES_DIR"), partidas);
+    else
+        entorno.remove(QStringLiteral("GOW_SAVES_DIR"));
+    if (!entorno.contains(QStringLiteral("GOW_MC0")))
+        entorno.insert(QStringLiteral("GOW_MC0"), rutaTarjeta(elf));
 
     // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
     QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
@@ -572,6 +588,129 @@ void Lanzador::detener()
         if (proceso->state() != QProcess::NotRunning)
             proceso->kill();
     });
+}
+
+// ---------------------------------------------------------------- Saves (memory card copies)
+namespace
+{
+    // MemoryCard::ImageSize (ps2xIOP memory_card.h): 16384 pages of 528 bytes, the PCSX2 .ps2 layout.
+    constexpr qint64 kTamanoTarjeta = 528ll * 16384ll;
+
+    // a save's folder name as given by QML: one plain folder inside the saves folder, nothing else
+    bool nombreValido(const QString &nombre)
+    {
+        return !nombre.isEmpty() && nombre == QFileInfo(nombre).fileName() && nombre != QStringLiteral(".") &&
+               nombre != QStringLiteral("..");
+    }
+
+    bool escribirArchivo(const QString &ruta, const QByteArray &datos)
+    {
+        QSaveFile archivo(ruta);
+        return archivo.open(QIODevice::WriteOnly) && archivo.write(datos) == datos.size() && archivo.commit();
+    }
+}
+
+QString Lanzador::rutaTarjeta(const QString &elf) const
+{
+    const QString ajuste = qEnvironmentVariable("GOW_MC0");
+    if (!ajuste.isEmpty() && ajuste != QStringLiteral("0"))
+        return ajuste;
+    return elf.isEmpty() ? QString() : QDir(QFileInfo(elf).absolutePath()).absoluteFilePath(QStringLiteral("Mcd001.ps2"));
+}
+
+QString Lanzador::nuevaPartida(const QString &carpeta, const QByteArray &tarjeta, const QString &etiqueta,
+                               const QString &origen) const
+{
+    const QDateTime ahora = QDateTime::currentDateTime();
+    const QString sello = ahora.toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QDir raiz(carpeta);
+    QString nombre = sello;
+    for (int n = 2; raiz.exists(nombre); ++n)
+        nombre = sello + QLatin1Char('-') + QString::number(n);
+    if (!raiz.mkpath(nombre))
+        return {};
+    const QString destino = raiz.absoluteFilePath(nombre);
+    QJsonObject info{{QStringLiteral("label"), etiqueta.left(40)},
+                     {QStringLiteral("time"), ahora.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))},
+                     {QStringLiteral("source"), origen},
+                     {QStringLiteral("card"), QStringLiteral("Mcd001.ps2")},
+                     {QStringLiteral("bytes"), static_cast<double>(tarjeta.size())}};
+    if (!escribirArchivo(destino + QStringLiteral("/Mcd001.ps2"), tarjeta) ||
+        !escribirArchivo(destino + QStringLiteral("/save.json"), QJsonDocument(info).toJson()))
+    {
+        QDir(destino).removeRecursively();
+        return {};
+    }
+    return nombre;
+}
+
+QVariantList Lanzador::partidas(const QString &carpeta) const
+{
+    QVariantList lista;
+    const QDir raiz(carpeta);
+    const QStringList nombres = raiz.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed);
+    for (const QString &nombre : nombres)
+    {
+        const QString ruta = raiz.absoluteFilePath(nombre);
+        if (!QFileInfo::exists(ruta + QStringLiteral("/Mcd001.ps2")))
+            continue;
+        QFile archivo(ruta + QStringLiteral("/save.json"));
+        QJsonObject info;
+        if (archivo.open(QIODevice::ReadOnly))
+            info = QJsonDocument::fromJson(archivo.readAll()).object();
+        lista << QVariantMap{{QStringLiteral("nombre"), nombre},
+                             {QStringLiteral("etiqueta"), info.value(QStringLiteral("label")).toString()},
+                             {QStringLiteral("fecha"), info.value(QStringLiteral("time")).toString(nombre)},
+                             {QStringLiteral("origen"), info.value(QStringLiteral("source")).toString()},
+                             {QStringLiteral("ruta"), ruta}};
+    }
+    return lista;
+}
+
+QString Lanzador::guardarPartida(const QString &carpeta, const QString &elf, const QString &etiqueta) const
+{
+    QFile tarjeta(rutaTarjeta(elf));
+    if (carpeta.isEmpty() || !tarjeta.open(QIODevice::ReadOnly))
+        return {};
+    return nuevaPartida(carpeta, tarjeta.readAll(), etiqueta, QStringLiteral("launcher"));
+}
+
+QString Lanzador::importarPartida(const QString &carpeta, const QString &archivo) const
+{
+    QFile origen(archivo);
+    if (carpeta.isEmpty() || origen.size() != kTamanoTarjeta || !origen.open(QIODevice::ReadOnly))
+        return {};
+    return nuevaPartida(carpeta, origen.readAll(), QFileInfo(archivo).completeBaseName(), QStringLiteral("import"));
+}
+
+bool Lanzador::restaurarPartida(const QString &carpeta, const QString &nombre, const QString &elf)
+{
+    const QString destino = rutaTarjeta(elf);
+    if (jugando() || !nombreValido(nombre) || destino.isEmpty())
+        return false; // the running game keeps the card in memory and would write over the restored file
+    QFile copia(QDir(carpeta).absoluteFilePath(nombre) + QStringLiteral("/Mcd001.ps2"));
+    if (copia.size() != kTamanoTarjeta || !copia.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray datos = copia.readAll();
+    QFile actual(destino);
+    if (actual.open(QIODevice::ReadOnly))
+    {
+        const QByteArray anterior = actual.readAll();
+        actual.close();
+        if (anterior == datos)
+            return true;
+        if (nuevaPartida(carpeta, anterior, QStringLiteral("before ") + nombre, QStringLiteral("backup")).isEmpty())
+            return false; // never replace the card without a copy of it
+    }
+    return escribirArchivo(destino, datos);
+}
+
+bool Lanzador::borrarPartida(const QString &carpeta, const QString &nombre) const
+{
+    if (!nombreValido(nombre) || carpeta.isEmpty())
+        return false;
+    QDir partida(QDir(carpeta).absoluteFilePath(nombre));
+    return partida.exists(QStringLiteral("Mcd001.ps2")) && partida.removeRecursively();
 }
 
 void Lanzador::abrirCarpeta(const QString &ruta) const

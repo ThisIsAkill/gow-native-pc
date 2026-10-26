@@ -7,7 +7,7 @@ The existing local hardware-test notes were preserved. No commit, push or releas
 ## Implemented
 
 - Patch 19: `GOW_VU1_CAPTURE_MISSES=1` records context only when an actually dispatched native block is absent,
-  before the JIT registers it. Each `block_<key>.bin` is still a full 16 KB image, **not a new block-only file format**.
+  before the JIT registers it. Each `block_<key>.bin` is still a full 16 KB image, **not a new block-only file format**. (Patch 26: one `miss_<image hash>.bin` per distinct image instead, same format.)
   Explicit entry heads are recorded even when JIT succeeds. Completed files are published atomically; unchanged
   block keys are not written again. Legacy continuous capture remains available without this variable.
 - Patch 19 also adds test-only `GOW_VU1X_ONLY=1`: with the JIT enabled, discard the initial AOT registry before slot

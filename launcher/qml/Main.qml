@@ -22,6 +22,8 @@ ApplicationWindow {
 
     // Page shown: 0 Home, 1 Install, 2 Graphics, 3 Performance, 4 Controls, 5 Cheats, 6 Other.
     property int pagina: pestanaInicial
+    // gow-native-pc: memory card copies (F1 > Saves in game, the Saves page here)
+    readonly property string carpetaPartidas: installer.repoRoot + "/data/" + installer.gameId + "/saves"
     // The Settings object for the pages: inside their Components "ajustes" names the page's own property.
     readonly property var ajustesGuardados: ajustes
 
@@ -221,6 +223,9 @@ ApplicationWindow {
             datosJit: ajustes.compilarAreas ? installer.repoRoot + "/data/" + installer.gameId : "",
             jitInline: ajustes.jitInline,
             diagnostics: ajustes.diagnostics,
+            framePc: installer.diagnosticsFramePc(),
+            // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)
+            partidas: carpetaPartidas,
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
@@ -957,7 +962,8 @@ ApplicationWindow {
 
         // Settings pages: a large title over a panel.
         Repeater {
-            model: ["pestInstalar", "pestGrafico", "pestRendimiento", "pestControles", "pestTrucos", "pestOtros"]
+            model: ["pestInstalar", "pestGrafico", "pestRendimiento", "pestControles", "pestTrucos", "pestOtros",
+                    "pestPartidas"]
             delegate: Item {
                 id: hojaAjustes
                 required property string modelData
@@ -992,7 +998,7 @@ ApplicationWindow {
                             anchors.margins: 24
                             anchors.rightMargin: 14
                             sourceComponent: [paginaInstalar, paginaGrafico, paginaRendimiento, paginaControles,
-                                              paginaTrucos, paginaOtros][hojaAjustes.index]
+                                              paginaTrucos, paginaOtros, paginaPartidas][hojaAjustes.index]
                         }
                     }
                 }
@@ -1042,6 +1048,15 @@ ApplicationWindow {
             onAviso: (t) => ventana.aviso(t)
             onPonerPortada: (r) => ventana.ponerPortada(r)
             onQuitarPortada: ventana.quitarPortada()
+        }
+    }
+
+    Component {
+        id: paginaPartidas
+        PaginaPartidas {
+            carpeta: ventana.carpetaPartidas
+            elf: { var e = ventana.idiomaJuego(ventana.ajustesGuardados.textoJuego) || ventana.idiomasJuego[0]; return e ? e.elf : "" }
+            onAviso: (t) => ventana.aviso(t)
         }
     }
 

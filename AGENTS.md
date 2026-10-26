@@ -59,15 +59,25 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
   while playing"; docs/research/vu1-x64-jit.md). GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (patch 17's background
   clang compiler, by hand: data/<id>/vu1_jit.json, which clang builds write, names the values).
   GOW_VU1_CAPTURE_MISSES=1 (patch 19): capture a context image only for a missing dispatched block, before JIT compilation;
-  block_*.bin stays a full 16 KB micro-memory, and indirect heads are recorded even when JIT succeeds. Launcher uses it.
+  each image is a full 16 KB micro-memory, written once per distinct image as miss_<image hash>.bin (patch 26; before it,
+  block_<key>.bin per missing block), and indirect heads are recorded even when JIT succeeds. Launcher uses it.
+  GOW_PERF_FRAME_PC (the profile's [diagnostics].frame_pc, read by InstallerBackend::diagnosticsFramePc) is set with the
+  Performance tab's diagnostics toggle, next to GOW_AUDIO_STATS / GOW_IOP_DRIFT / GOW_VU1N_DIAG / GOW_PERF_DIAG.
+  GOW_MC0 (the memory card image: Mcd001.ps2 next to the ELF unless already set) and GOW_SAVES_DIR (data/<id>/saves):
+  F1 > Saves in game copies the card to GOW_SAVES_DIR/<yyyyMMdd-HHmmss>/{Mcd001.ps2, save.json} (patch 26); the Saves
+  tab (PaginaPartidas.qml, Lanzador::partidas/guardarPartida/importarPartida/restaurarPartida/borrarPartida) lists,
+  makes, imports, deletes and restores copies. save.json: {label, time, source: F1|launcher|import|backup, card, bytes}.
+  A restore needs the game closed and first keeps the current card as a "backup" copy. There are no savestates: a copy
+  holds the game's own last save (save altars), see docs/saves.md.
   GOW_VU1X_INLINE=0 selects the helper tier; GOW_VU1X_ONLY=1 is test-only (clears AOT registrations, requires JIT on).
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
 - **Step texts** of build.ps1 (`=== record: ...`, `=== build the game ...`, ...) are matched by prefix in
   LoadingScreen.qml (pasoDe) and InstallPage.qml (stepLabel): change both when renaming a step.
 - The runtime registers the game's overrides for the ELF **file name** (`SCUS_973.99`) in the ELF's folder, and uses
-  that folder as the CD root and `mc0/` there as the memory card: every prepared disc folder keeps the original ELF
-  name; `mc0` is a junction to `data/<id>/mc0`.
+  that folder as the CD root: every prepared disc folder keeps the original ELF name; `mc0` is a junction to
+  `data/<id>/mc0`. The memory card the IOP really uses is the PCSX2-format image `Mcd001.ps2` in that folder (or
+  `GOW_MC0`), so each prepared disc folder has its own card file.
 
 ## Language conventions
 

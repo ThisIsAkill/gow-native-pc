@@ -42,6 +42,7 @@ set(ARCHIVOS_QML
     qml/InstallPage.qml
     qml/LoadingScreen.qml
     qml/PaginaControles.qml
+    qml/PaginaPartidas.qml
     qml/PaginaTrucos.qml
     qml/PaginaOtros.qml
 )
