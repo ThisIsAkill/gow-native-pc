@@ -4,7 +4,7 @@
 #              downloaded once and checked against its SHA-256); every other stage also fetches what it needs
 #   fetch      engine/runtime: clone engine/runtime.toml's repository at its commit, apply engine/patches/*.patch
 #   discs      -Discs "<iso>|<iso>": tools/disc/prepare.py -> data/<game>/discs/*, languages.json, one memory card
-#   vu1disc    experimental: the VU1 microcode of every level read from the prepared disc (tools/disc/vu1_from_disc.py)
+#   vu1disc    experimental: usable VU1 uploads read from the prepared disc (tools/disc/vu1_from_disc.py; partial coverage)
 #              into data/<game>/vu1_capture, so the next configure + build compiles it without playing (run "native")
 #   configure  CMake + Ninja in -BuildRoot (a short path: the runtime's dependencies exceed MAX_PATH in long folders),
 #              with the recorded VU1 microcode (data/<game>/vu1_capture) when there is some
@@ -313,7 +313,9 @@ if ($Stages -contains 'fetch') {
         $touched = @(& $git -C $rt diff --name-only HEAD $trees[-1])
         & $git -C $rt read-tree HEAD
         & $git -C $rt add -u 2>$null
-        if ($touched.Count) { & $git -C $rt add -A -- $touched 2>$null }
+        # New files in a later patch may not exist yet. One absent path makes `git add` reject the whole list.
+        $present = @($touched | Where-Object { Test-Path (Join-Path $rt $_) })
+        if ($present.Count) { & $git -C $rt add -A -- $present 2>$null }
         $current = "$(& $git -C $rt write-tree)".Trim()
     }
     finally {
@@ -322,7 +324,7 @@ if ($Stages -contains 'fetch') {
         $ErrorActionPreference = 'Stop'
     }
     $done = [array]::IndexOf($trees, $current)
-    if ($done -lt 0) { throw 'engine\runtime has changes that are not engine\patches: delete the engine\runtime folder and run again' }
+    if ($done -lt 0) { throw 'engine\runtime differs from the patch chain: preserve local work and compare it with engine\patches before retrying' }
     for ($i = 0; $i -lt $patches.Count; $i++) {
         if ($i -lt $done) { Write-Host "patch $($patches[$i].Name): applied"; continue }
         Native $git @('-C', $rt, 'apply', $patches[$i].FullName) "patch $($patches[$i].Name)"
@@ -388,6 +390,10 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto') {
             "-DCMAKE_C_FLAGS=$flags", "-DCMAKE_CXX_FLAGS=$flags", "-DCMAKE_EXE_LINKER_FLAGS=$link")
     }
     $extra += "-DPython3_EXECUTABLE=$(Barra $python)"
+    # Reusing pinned dependencies needs no network update. An explicit fetch run permits new revisions again.
+    # Initial dependency downloads still work with UPDATES_DISCONNECTED (unlike FULLY_DISCONNECTED).
+    $dependencyUpdates = if ($Stages -contains 'fetch') { 'OFF' } else { 'ON' }
+    $extra += "-DFETCHCONTENT_UPDATES_DISCONNECTED=$dependencyUpdates"
     Native 'cmake' (@('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
@@ -470,6 +476,13 @@ function Build-Game([string]$dir = $bld) {
     $ErrorActionPreference = 'Stop'
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
     Write-Host "OK: $(Join-Path $dir 'ps2xRuntime\ps2EntryRunner.exe')"
+    $bootFile = Join-Path $dir 'ps2xRuntime\gow-native.boot'
+    $elf = (Languages).recompile_elf
+    if ($dir -eq $bld -and $elf -and (Test-Path $elf) -and -not (Test-Path $bootFile)) {
+        # A launcher session replaces these defaults with the selected disc and runtime settings.
+        $bootText = "GOW_NATIVE_BOOT_V1`n$elf`nGOW_VU1N_X64=1`nGOW_VU1_CAPTURE_MISSES=1`nGOW_VU1_CAPTURA=$vu1`nPS2X_GS_HW=1`nPS2X_GS_WORKER=1`nTOBIICHI_PANORAMICO=16:9`n"
+        [IO.File]::WriteAllText($bootFile, $bootText, (New-Object Text.UTF8Encoding($false)))
+    }
     # the background VU1 compiler (launcher: "Compile new areas while playing") builds modules with this compiler and the
     # build's flags; clang only (an MSVC game has another C++ library layout than llvm-mingw modules)
     if ($Toolchain -eq 'clang' -and $dir -eq $bld) {
@@ -536,13 +549,14 @@ if ($Stages -contains 'optimize') {
     # draws as usual, nothing shows on the desktop and no key can reach the game
     $vars = @{ GOW_VU1_CAPTURA = $vu1; PS2X_IOP_DUMP_MODULES = $iopMods; GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_AUDIO = '0'
                GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'
-               GOW_WINDOW_HIDDEN = '1'; GOW_PAD_GUION = $prof.optimize.pad_script }
+               GOW_WINDOW_HIDDEN = '1'; GOW_VU1N_X64 = '1'; GOW_VU1_CAPTURE_MISSES = '1'; GOW_PAD_GUION = $prof.optimize.pad_script }
     foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
     # nothing left from the build (mspdbsrv, vctip, a stray cl.exe) may compete with the game for the 4 minutes
     Get-Process -Name mspdbsrv, vctip, cl, link -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $p = Start-Process -FilePath $runnerExe -ArgumentList "`"$elf`"" -WorkingDirectory $logs -PassThru
     try { $p.PriorityClass = 'Normal' } catch { }
     for ($t = 0; $t -lt $secs -and -not $p.HasExited; $t += 5) { Start-Sleep 5; Write-Host "@@progress $([math]::Min($t + 5, $secs)) $secs" }
+    if (-not $p.HasExited) { $null = Close-GameWindow $p.Id; $null = $p.WaitForExit(15000) }
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     foreach ($k in $vars.Keys) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 }

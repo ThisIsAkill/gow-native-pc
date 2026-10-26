@@ -5,6 +5,8 @@ done, how it was measured, and what is left.
 
 | Document | Subject |
 |---|---|
+| [audio-standalone-mods-2026-10-26.md](audio-standalone-mods-2026-10-26.md) | Mixer overflow regression, direct launch, audio diagnosis, HUD and mod compatibility roadmap |
+| [jit-delivery-2026-10-26.md](jit-delivery-2026-10-26.md) | Patches 19-23, disc scan/cache, miss capture, incremental compilation, launcher integration, real-game JIT validation and next patches |
 | [vu1-x64-jit.md](vu1-x64-jit.md) | The in-process x86-64 VU1 JIT (engine/patches/18): design, contracts with the dispatcher, tests, how to extend it, risks |
 | [vu1-jit-prototype-2026-10-26.md](vu1-jit-prototype-2026-10-26.md) | VU1 code for every area: disc extraction (tools/disc/vu1_from_disc.py), background clang compiler (patch 17) |
 | [handoff-2026-10-25-performance-phases.md](handoff-2026-10-25-performance-phases.md) | Performance phases 1-5 (patches 10-13), frame timeline, how to measure |

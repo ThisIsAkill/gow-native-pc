@@ -37,6 +37,9 @@ movie_ext = ".PSS"
 seconds = 240
 pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadrado,44:triangulo,48:lup*3,52:x,55:cuadrado,56:triangulo,60:circulo,64:r1,70:lleft*2,74:cuadrado,76:cuadrado,80:triangulo,90:lup*4,96:x,100:cuadrado,104:l1,110:lright*2,120:cuadrado,125:triangulo,140:lup*5,150:cuadrado,160:triangulo,180:lup*5,200:cuadrado"
 
+[diagnostics]
+frame_pc = "0x1837B8"          # vid::Flip: guest frames, distinct from host presentation rate
+
 # Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
 # accepted as a translation, and its language is guessed from the words below.
 [[editions]]

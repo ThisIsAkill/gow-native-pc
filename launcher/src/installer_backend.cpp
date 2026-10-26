@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -109,6 +110,21 @@ QString InstallerBackend::runnerPath() const
     QString folder = buildRoot();
     if (toolchainOf(m_root) == QStringLiteral("clang"))
         folder += QStringLiteral("-clang");
+    // A fresh installation must not reuse the default build folder of another repository copy.
+    QFile cache(folder + QStringLiteral("/CMakeCache.txt"));
+    if (!cache.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
+    QString source;
+    const QByteArray prefix("CMAKE_HOME_DIRECTORY:INTERNAL=");
+    while (!cache.atEnd())
+    {
+        const QByteArray line = cache.readLine().trimmed();
+        if (line.startsWith(prefix))
+            source = QDir::cleanPath(QDir::fromNativeSeparators(QString::fromUtf8(line.mid(prefix.size()))));
+    }
+    const QString expected = QDir::cleanPath(m_root + QStringLiteral("/engine/runtime/PS2Recomp"));
+    if (source.compare(expected, Qt::CaseInsensitive) != 0)
+        return {};
     const QString exe = folder + QStringLiteral("/ps2xRuntime/ps2EntryRunner.exe");
     return QFileInfo::exists(exe) ? exe : QString();
 }
@@ -118,6 +134,7 @@ QVariantMap InstallerBackend::environment() const
     const QString vswhere = qEnvironmentVariable("ProgramFiles(x86)") + QStringLiteral("/Microsoft Visual Studio/Installer/vswhere.exe");
     const QString runtimeDir = m_root + QStringLiteral("/engine/runtime");
     return {
+        {QStringLiteral("toolchain"), toolchainOf(m_root)},
         // the build tools are downloaded by the pipeline (stage "tools"); only a copy switched to MSVC needs the Build Tools
         {QStringLiteral("tools"), toolsReady()},
         {QStringLiteral("buildTools"), toolchainOf(m_root) == QStringLiteral("clang") || QFileInfo::exists(vswhere)},
@@ -128,6 +145,13 @@ QVariantMap InstallerBackend::environment() const
         {QStringLiteral("runner"), runnerPath()},
         {QStringLiteral("dataDir"), m_root + QStringLiteral("/data")},
     };
+}
+
+void InstallerBackend::openRunnerFolder() const
+{
+    const QString runner = runnerPath();
+    if (!runner.isEmpty())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(runner).absolutePath()));
 }
 
 QVariantList InstallerBackend::languages() const
@@ -146,6 +170,25 @@ QVariantList InstallerBackend::languages() const
 bool InstallerBackend::firstPlayPrepared() const
 {
     return QFileInfo::exists(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/native.stamp"));
+}
+
+bool InstallerBackend::hasPendingNativeCode() const
+{
+    const QString base = m_root + QStringLiteral("/data/") + m_game;
+    const QDateTime built = QFileInfo(base + QStringLiteral("/native.stamp")).lastModified();
+    const QDir captures(base + QStringLiteral("/vu1_capture"));
+    for (const QFileInfo &file : captures.entryInfoList({QStringLiteral("*.bin"), QStringLiteral("vu1n_heads_seen.txt")}, QDir::Files))
+        if (!built.isValid() || file.lastModified() > built)
+            return true;
+    return false;
+}
+
+QVariantMap InstallerBackend::discScanReport() const
+{
+    QFile file(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/vu1_capture/disc-report.json"));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return QJsonDocument::fromJson(file.readAll()).object().toVariantMap();
 }
 
 QStringList InstallerBackend::loadingArt() const
@@ -193,6 +236,9 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
         args << QStringLiteral("-Discs") << isos.join(QLatin1Char('|'));
     const QString config = options.value(QStringLiteral("config"), QStringLiteral("Release")).toString();
     args << QStringLiteral("-Config") << config;
+    const QString toolchain = options.value(QStringLiteral("toolchain")).toString();
+    if (toolchain == QStringLiteral("clang") || toolchain == QStringLiteral("msvc"))
+        args << QStringLiteral("-Toolchain") << toolchain;
     if (options.value(QStringLiteral("ltcg")).toBool())
         args << QStringLiteral("-Ltcg");
     m_stages = stages;
@@ -207,9 +253,21 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
     m_process->setProcessEnvironment(environment);
     m_process->setWorkingDirectory(m_root);
     m_process->setProcessChannelMode(QProcess::MergedChannels);
+    connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error)
+    {
+        if (error != QProcess::FailedToStart || !m_process)
+            return;
+        emit logLine(m_process->errorString());
+        m_process->deleteLater();
+        m_process = nullptr;
+        emit runningChanged();
+        emit finished(false, -1);
+    });
     connect(m_process, &QProcess::readyReadStandardOutput, this, &InstallerBackend::readOutput);
     connect(m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status)
     {
+        if (!m_process)
+            return;
         readOutput();
         if (!m_pending.isEmpty())
             emit logLine(QString::fromLocal8Bit(m_pending));

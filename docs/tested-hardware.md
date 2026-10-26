@@ -38,6 +38,62 @@ Discs on machine A with the current configuration (clean build of this repositor
 Other findings on machine A: fullscreen start crashed (0xC0000005) until `engine/patches/03`; without `IOP_MOD/` the
 game waited on the legal screen forever (handled by `tools/disc/prepare.py`).
 
+## Local Windows JIT validation (2026-10-26)
+
+Branch `prototipo-claude`, commit `30b007f` (same commit as `origin/claude/keen-dirac-42wd1y`), runtime patches 01-18.
+Built on machine A with llvm-mingw clang 23.1.4, Release, existing PGO profile, LTCG off, and 9,501 captured VU1 images.
+Executable: `C:\gow-build-44a8e3b6-clang\ps2xRuntime\ps2EntryRunner.exe`.
+
+- Full game build and the three documented JIT test targets completed successfully on Windows.
+- `gow_vu1_jit_aot_test - 2000` and `gow_vu1_jit_test x64 2000`: both exited 0; 4,000 cases, 22,000 native blocks,
+  identical digest `7c9d4a139489ff09`. Both had the same 284 known edge-input differences from the exact engine.
+- Transform microbenchmark: exact engine 18.448 us, JIT 1.838 us per run (10.0x); AOT 1.135 us in its separate run.
+  These are synthetic timings, not a game frame-rate improvement.
+- Fuzz: seeds 1-6, 4 images x 6 trials each, `x64` versus `x64-calls`: all exited 0 with matching digest and compiled
+  block count per seed (242-262 compiled blocks). Inline compile time averaged 13.7-15.0 us per block.
+- Game smoke test: 100 seconds, prepared USA disc, hardware renderer, hidden 1280x720 window, audio off,
+  `GOW_VU1N_X64=1`, `GOW_VU1N_VERIFY=2000`, fast boot and scripted Start/X input. Gameplay reached
+  (`state=11 levelReady=1`); 2,000 native checks, 0 mismatches; gameplay diagnostics showed `missBlocks=0` and
+  `laneFails=0`. Host presentation rate at t=50-95 s was 59.72-59.92 Hz. The 80-second capture showed the ship,
+  Kratos, enemies, textures and HUD. The process ended after WM_CLOSE without forced termination; the PowerShell
+  process wrapper did not report an exit code, so no exit-code assertion is made for this run.
+- **Coverage limit:** `[vu1x] compiled=0` throughout the game smoke test: existing AOT captures covered the scene.
+  Actual JIT execution was validated by the synthetic tests; newly encountered game areas beyond the ship remain
+  untested. This does not establish correctness or performance throughout the game.
+
+Local evidence (generated, not committed): `data/gow1/logs/jit-smoke-20261026-164716/`, `jit-aot-test.log`,
+`jit-x64-test.log`, `jit-fuzz-<seed>-<mode>.log`, `jit-test-build.log` and `build.log` in `data/gow1/logs/`.
+
+## Incremental build and JIT delivery (2026-10-26)
+
+Machine A, runtime patches 01-23, clang Release with existing PGO and LTCG off; rebuilt game and Qt 6.8.3 launcher.
+v2.0.0 is already an ancestor of the working branch. Full details and reproduction commands:
+[JIT delivery report](research/jit-delivery-2026-10-26.md).
+
+- Disc scan: 956 files, 6 usable images, 470 blocks; 112.088 s cold, 0.420 s cached. This is partial disc coverage.
+- Native analysis: 9,480 images; 143.103 s cold, 15.154 s cached, six generated C++ files and timestamps unchanged.
+- Final x64/AOT digest and six inline/helper fuzz seeds matched. The 284 documented synthetic edge-input differences
+  from the exact engine remain; the new patches do not change arithmetic.
+- Two 100 s real-game checks (JIT-only and normal hybrid): gameplay reached, 2,000 comparisons with zero mismatches,
+  exit code 0, no forced termination. JIT-only compiled 619 blocks with zero unsupported, 16.4 us average compilation.
+  Guest FPS at t=40-95 s: JIT-only 15.40-33.35, median 28.40; hybrid 32.95-59.58, median 56.55. Different simulation
+  progress prevents a controlled same-frame comparison. The host's ~120 Hz is not the game frame rate.
+- The ship capture showed characters, textures and HUD. Later levels and NVIDIA were not tested in this delivery.
+- Final setup: 61,673,468 bytes; all 1,417 files matched staging after independent LZMS decompression (8 blocks,
+  128,323,300 unpacked bytes). Setup preview exited 0 with empty stderr; launcher binaries in development and staging
+  have identical SHA-256. This validates packaging/startup, not Windows install/uninstall registration end to end.
+  Installer SHA-256: `95f951e5bb25ecda4db3551d33807e495f017435be3ff9d39a38a4602fdb3632`.
+  This artifact checksum was recorded after packaging; the copy of this document inside that artifact predates it.
+
+## Audio/direct-launch follow-up (2026-10-26)
+
+Same local RX 580 machine and clang build, 2x OpenGL. Patch 24's deterministic multi-voice mixer regression fails
+before the correction and passes in batch/per-frame/verification modes afterward. Original and PT-BR translated
+disc runs, 100 seconds each with audio, reach opening combat and verify 2,000 VU1 runs with zero mismatches.
+Both exit normally; after startup, 17 five-second windows each have zero missing/dropped output samples.
+The hatch and sailor scene have not been reproduced; this is not an all-audio-bugs-fixed claim.
+See [audio investigation and compatibility plan](research/audio-standalone-mods-2026-10-26.md).
+
 ## Reported by the projects this builds on (not re-tested here)
 
 | Machine | Code | Reported result | Source |
@@ -57,3 +113,14 @@ game waited on the legal screen forever (handled by `tools/disc/prepare.py`).
   VU1 interpreter (slower) until their code is recorded and compiled.
 - **GPU**: internal resolution (each step costs its square); dynamic resolution lowers it when the GPU falls behind.
 - **Power plan / laptops**: "power saver" or battery lowers the CPU clock and the frame rate.
+
+### Follow-up artifact validation
+
+The updated setup is 61,683,346 bytes, SHA-256
+`7300d6ffd55c5bfbd8275839c6025ceae63b765980d23eae46b234d9bbcd69f1`.
+Independent decompression verified all 1,421 staged files, 8 LZMS blocks, 128,355,429 unpacked bytes.
+No installation/uninstallation registration test was performed on the player's existing install.
+Standalone no-argument boot reached gameplay in a 100-second test with 2,000 VU1 checks / zero mismatches and exit 0.
+The 300-second empty load screen had zero missing/dropped samples after startup, 54.17-58.99 guest FPS after 20 s;
+this does not validate a populated save list. The final artifact checksum and standalone result were recorded after
+packaging; the embedded documentation predates those final result lines.

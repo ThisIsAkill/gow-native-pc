@@ -13,6 +13,7 @@
 #include <QScreen>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QSaveFile>
 #include <QTextStream>
 #include <QTimer>
 
@@ -395,13 +396,16 @@ bool Lanzador::iniciar(const QVariantMap &a)
     else
         entorno.insert(QStringLiteral("TOBIICHI_TRUCOS"), trucos);
     entorno.insert(QStringLiteral("TOBIICHI_IDIOMA"), a.value(QStringLiteral("idioma"), QStringLiteral("en")).toString());
-    // gow-native-pc: continuous optimisation. The runtime writes each VU1 micro-memory it has not seen before (cheap: only
-    // new code); the Install tab's "Speed up visited areas" compiles them into the game as native code.
+    // Capture context for missing native blocks; "Speed up visited areas" compiles it for future sessions.
     const QString capturaVu1 = a.value(QStringLiteral("capturaVu1")).toString();
     if (!capturaVu1.isEmpty() && QDir().mkpath(capturaVu1))
         entorno.insert(QStringLiteral("GOW_VU1_CAPTURA"), capturaVu1);
     else
         entorno.remove(QStringLiteral("GOW_VU1_CAPTURA"));
+    entorno.insert(QStringLiteral("GOW_VU1_CAPTURE_MISSES"), QStringLiteral("1"));
+    // Keep diagnostic overrides from leaking into normal play; the JIT helper tier is a user-selected fallback.
+    entorno.remove(QStringLiteral("GOW_VU1X_ONLY"));
+    entorno.insert(QStringLiteral("GOW_VU1X_INLINE"), a.value(QStringLiteral("jitInline"), true).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
     // gow-native-pc: VU1 code the build did not compile (areas the first-play recording never reached) is compiled while
     // playing by the in-process x86-64 JIT (engine/patches/18, GOW_VU1N_X64: no compiler or files needed, any toolchain).
     // The background clang compiler (patch 17, GOW_VU1N_JIT + data/<game>/vu1_jit.json) stays available by hand.
@@ -478,6 +482,25 @@ bool Lanzador::iniciar(const QVariantMap &a)
     if (!entorno.contains(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR")))
         entorno.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"), cache);
     aplicarTarjeta(entorno, a.value(QStringLiteral("gpu")).toString(), ejecutable);
+    if (a.value(QStringLiteral("diagnostics"), false).toBool())
+        for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"),
+                                   QStringLiteral("GOW_VU1N_DIAG"), QStringLiteral("GOW_PERF_DIAG")})
+            entorno.insert(key, QStringLiteral("1"));
+
+    // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
+    QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
+    if (boot.open(QIODevice::WriteOnly))
+    {
+        QByteArray bytes = "GOW_NATIVE_BOOT_V1\n" + QFileInfo(elf).absoluteFilePath().toUtf8() + '\n';
+        for (const QString &key : entorno.keys())
+            if (key.startsWith(QStringLiteral("TOBIICHI_")) || key.startsWith(QStringLiteral("PS2X_")) || key.startsWith(QStringLiteral("GOW_")))
+            {
+                const QString value = entorno.value(key);
+                if (!value.contains('\n') && !value.contains('\r'))
+                    bytes += key.toUtf8() + '=' + value.toUtf8() + '\n';
+            }
+        if (boot.write(bytes) == bytes.size()) boot.commit();
+    }
 
     // Log: the previous game's log is kept as anterior.log.
     const QString registro = rutaRegistro();

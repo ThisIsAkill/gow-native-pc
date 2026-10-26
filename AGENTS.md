@@ -45,6 +45,7 @@ Build folder: `C:\gow-build` (Release) / `C:\gow-build-dev` (RelWithDebInfo). It
 dependencies (git checkouts) exceed MAX_PATH under long paths. One folder per copy of this repository (CMake refuses a
 cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` when `C:\gow-build` belongs to another
 copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
+The launcher also checks CMakeCache's source root before accepting a runner, so a fresh copy cannot use another copy's build.
 
 ## Contracts (do not break)
 
@@ -57,6 +58,9 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
   GOW_VU1N_X64=1 (in-process x86-64 VU1 JIT, engine/patches/18, experimental: the Performance tab's "Compile new areas
   while playing"; docs/research/vu1-x64-jit.md). GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (patch 17's background
   clang compiler, by hand: data/<id>/vu1_jit.json, which clang builds write, names the values).
+  GOW_VU1_CAPTURE_MISSES=1 (patch 19): capture a context image only for a missing dispatched block, before JIT compilation;
+  block_*.bin stays a full 16 KB micro-memory, and indirect heads are recorded even when JIT succeeds. Launcher uses it.
+  GOW_VU1X_INLINE=0 selects the helper tier; GOW_VU1X_ONLY=1 is test-only (clears AOT registrations, requires JIT on).
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
 - **Step texts** of build.ps1 (`=== record: ...`, `=== build the game ...`, ...) are matched by prefix in
@@ -96,6 +100,10 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
    `GOW_PERF_DIAG=1` prints `[gow-perf]` per 5 s (ee/vu/gs/iop/guest_wait ms, host_hz); `TOBIICHI_FPS_GOSTER=1` draws
    the counter in the window.
 5. Record results in `docs/tested-hardware.md`.
+   `tools/test/jit-smoke.ps1 -Mode hybrid|jit|calls` runs a scripted local test and writes logs, captures and summary.json.
+   The game's guest-frame probe comes from `[diagnostics].frame_pc` in its profile.
+   `tools/disc/vu1_analysis_cache_test.py --gen <generator> <procedural.bin>` checks cache/reference equality and invalidation.
+   `tools/test/verify_setup.py <setup.exe> <staging dir>` checks every packaged byte without installing into Windows.
 6. Profiling: `build.cmd -Stages configure,build -Pdb` (Release with ps2EntryRunner.pdb, same code), then
    `tools/profile/sampler.cpp` (build line in its header) `sampler.exe ps2EntryRunner.exe <seconds> <delay>` prints the
    hottest functions per thread (GameThread = EE, the VIF1/VU1 worker, GSThread). `GOW_VU1N_DIAG=1` prints native VU1
@@ -119,3 +127,20 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
 - windows.h defines `near` and `far`: not usable as identifiers in runtime code that includes it (the VU1 JIT files).
 - Runtime fixes taken from the God of War II port must be checked on God of War: its `SetupThread` argc/argv change
   (5b1a25a) makes this game load its IRX as `cdrom0:\...;1` and hang at boot (left out of patch 05).
+- VU1 analysis cache (patch 22) lives in the generated build folder, contains game-derived data, and must never ship.
+  Configure skips remote dependency updates on routine rebuilds; include `fetch,configure` when changing dependency
+  revisions so CMake may fetch new commits. Initial downloads are still allowed.
+  It is invalidated by generator contents, entry heads and image hashes; `--no-cache` is the reference path.
+  Patch 21 uses stable block-key shards, so new blocks do not move unrelated functions between translation units.
+- Disc scans write `vu1_capture/disc-report.json`; a cache hit requires matching source metadata, implementation/profile
+  and output hashes. `--force` rescans when source bytes changed without metadata. Six images/470 blocks were found on
+  the local USA disc; this does not establish whole-game coverage. Keep the experimental wording in the launcher.
+
+## Direct launch and diagnostics
+
+The pipeline creates `gow-native.boot` beside the built runner; the launcher atomically refreshes it on play.
+It records the selected ELF and runtime-prefixed environment variables only. No-argument runner launches restore it
+and write `standalone.log` beside the executable (patch 25). Never package this machine-specific profile.
+The Performance diagnostics toggle enables audio buffer/rate, IOP drift, VU1 and performance counters.
+`tools/test/sound_regression.cpp` covers positive/negative SPU2 master-volume overflow (patch 24).
+See `docs/research/audio-standalone-mods-2026-10-26.md` for unresolved scene, HUD and mod acceptance criteria.

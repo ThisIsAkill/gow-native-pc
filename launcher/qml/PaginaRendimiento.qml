@@ -55,11 +55,28 @@ ScrollView {
         Fila {
             titulo: Tema.t("compilarAreas")
             descripcion: Tema.t("compilarAreasDesc")
-            separador: false
             Interruptor {
                 checked: raiz.ajustes.compilarAreas
                 onToggled: raiz.ajustes.compilarAreas = checked
             }
+        }
+
+        Fila {
+            titulo: Tema.t("jitInline")
+            descripcion: Tema.t("jitInlineDesc")
+            Interruptor { checked: raiz.ajustes.jitInline; enabled: raiz.ajustes.compilarAreas; onToggled: raiz.ajustes.jitInline = checked }
+        }
+        Fila {
+            titulo: Tema.t("autoNative")
+            descripcion: Tema.t("autoNativeDesc")
+            separador: false
+            Interruptor { checked: raiz.ajustes.autoNative; onToggled: raiz.ajustes.autoNative = checked }
+        }
+
+        Fila {
+            titulo: Tema.t("runtimeDiagnostics")
+            descripcion: Tema.t("runtimeDiagnosticsDesc")
+            Interruptor { checked: raiz.ajustes.diagnostics; onToggled: raiz.ajustes.diagnostics = checked }
         }
 
         Rectangle {

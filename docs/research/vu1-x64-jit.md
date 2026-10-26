@@ -1,5 +1,8 @@
 # VU1 x86-64 JIT (engine/patches/18) — design, contracts, tests, how to change it
 
+Windows real-game validation and follow-up patches 19-23 are recorded in
+[jit-delivery-2026-10-26.md](jit-delivery-2026-10-26.md). The original results below describe patch 18's initial delivery.
+
 This is the reference for anyone, a person or an AI, who changes, extends or debugs the in-process VU1 JIT. It assumes
 `AGENTS.md` (project layout and rules) and, for background, `docs/research/vu1-jit-prototype-2026-10-26.md` (why the
 JIT exists, the disc extraction and the clang background compiler).

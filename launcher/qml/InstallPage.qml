@@ -25,11 +25,15 @@ ScrollView {
     property bool showLog: false
     property bool showMore: false
     property bool prepareFirstPlay: true   // the install ends with the first-play preparation (optimize stage)
+    property bool scanDisc: false
+    property string toolchain: env.toolchain || "clang"
+    property var scanReport: installer.discScanReport()
     property bool lastOk: true
 
     function refresh() {
         env = installer.environment()
         languages = installer.languages()
+        scanReport = installer.discScanReport()
     }
     function compatibleIsos() {
         var out = []
@@ -47,11 +51,12 @@ ScrollView {
         begin()
         var stages = "tools,fetch"
         if (compatibleIsos().length > 0) stages += ",discs"
+        if (scanDisc) stages += ",vu1disc"
         stages += ",configure,recomp,sync,build"
         if (prepareFirstPlay) stages += ",optimize"
-        installer.run(stages, { isos: compatibleIsos(), config: "Release" })
+        installer.run(stages, { isos: compatibleIsos(), config: "Release", toolchain: root.toolchain })
     }
-    function maintenance(stages) { begin(); installer.run(stages, { config: "Release" }) }
+    function maintenance(stages) { begin(); installer.run(stages, { config: "Release", toolchain: root.toolchain }) }
     function pickIsos(paths) {
         if (env.tools) { installer.identify(paths); return }
         pendingIsos = paths                 // reading an ISO needs the portable Python: fetch the tools first
@@ -260,12 +265,32 @@ ScrollView {
         }
 
         // ---------------------------------------------------------------- 3. install
+        BotonSecundario {
+            text: Tema.t("openGameExecutable")
+            visible: root.env.game
+            onClicked: installer.openRunnerFolder()
+        }
         Paso {
             numero: 3
             titulo: root.env.game ? Tema.t("instGameReady") : Tema.t("instInstallTitle")
             descripcion: root.env.game ? Tema.t("instGameReadyDesc") : Tema.t("instInstallDesc")
             hecho: root.env.game && !installer.running
             activo: root.canInstall || installer.running || root.env.game
+            Fila {
+                titulo: Tema.t("instCompiler")
+                descripcion: Tema.t("instCompilerDesc")
+                Selector {
+                    opciones: [{ texto: "clang", valor: "clang" }, { texto: "Visual Studio", valor: "msvc" }]
+                    valor: root.toolchain
+                    enabled: !installer.running
+                    onElegido: (v) => root.toolchain = v
+                }
+            }
+            Fila {
+                titulo: Tema.t("instDiscScanOption")
+                descripcion: Tema.t("instVu1DiscDesc")
+                Interruptor { checked: root.scanDisc; enabled: !installer.running; onToggled: root.scanDisc = checked }
+            }
             Fila {
                 titulo: Tema.t("instFirstPlay")
                 descripcion: Tema.t("instFirstPlayDesc")
@@ -399,6 +424,14 @@ ScrollView {
                 titulo: Tema.t("instVu1Disc")
                 descripcion: Tema.t("instVu1DiscDesc")
                 BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("vu1disc,native") }
+            }
+            Text {
+                visible: root.scanReport.complete === true
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: Tema.tf("instDiscReport", root.scanReport.files || 0, root.scanReport.blocks || 0)
+                color: Tema.textoSuave
+                font.pixelSize: 13
             }
             Fila {
                 titulo: Tema.t("instPgo")

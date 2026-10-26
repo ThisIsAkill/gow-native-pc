@@ -61,7 +61,10 @@ ApplicationWindow {
         property string portada: ""
         property string teclas: "" // key map as JSON (empty = default layout)
         property string mando: "" // controller layout as JSON (empty = the fixed layout of controlesDmc5)
-        property bool compilarAreas: false // background VU1 compiler while playing (GOW_VU1N_JIT, experimental)
+        property bool compilarAreas: true // in-process x64 JIT; existing saved choices are preserved
+        property bool autoNative: false // optional AOT build after a successful play session
+        property bool jitInline: true
+        property bool diagnostics: false
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
         property string textoJuego: "" // game language: a "language" of installer.languages() (e.g. "en", "pt-BR"); empty = ask
         property real portadaFoco: 0.55
@@ -191,11 +194,11 @@ ApplicationWindow {
     }
 
     function jugar() {
+        if (installer.running || lanzador.jugando) return
         refrescarInstalacion()
         if (!listo) { aviso(Tema.t("instNotReady")); ventana.pagina = 1; return }
-        // gow-native-pc: without the first-play preparation the vector-unit code still runs interpreted: say so instead of
-        // letting the first minutes look frozen
-        if (!installer.firstPlayPrepared()) aviso(Tema.t("firstPlayNotice"))
+        // Explain the interpreter cost when neither first-play preparation nor the JIT is available.
+        if (!installer.firstPlayPrepared() && !ajustes.compilarAreas) aviso(Tema.t("firstPlayNotice"))
         var elegido = idiomaJuego(ajustes.textoJuego)
         if (!elegido) {
             if (idiomasJuego.length > 1) { preguntaIdioma.open(); return }
@@ -216,6 +219,8 @@ ApplicationWindow {
             capturaVu1: installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
             // experimental: VU1 code met without native code is compiled while playing (x86-64 JIT, GOW_VU1N_X64)
             datosJit: ajustes.compilarAreas ? installer.repoRoot + "/data/" + installer.gameId : "",
+            jitInline: ajustes.jitInline,
+            diagnostics: ajustes.diagnostics,
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
@@ -267,6 +272,8 @@ ApplicationWindow {
                 dialogoError.open()
             } else {
                 ventana.aviso(Tema.tf("terminadoOk", Tema.duracion(segundos)))
+                if (ajustes.autoNative && !installer.running && installer.hasPendingNativeCode())
+                    installer.run("native", { config: "Release" })
             }
         }
         function onError(clave, detalle) {

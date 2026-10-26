@@ -23,9 +23,12 @@ VU instructions (see plausible()). Output is game data: it stays in data/ and is
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
+import re
 import struct
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -83,8 +86,12 @@ def plausible(gen, code):
 def uploads(gen, data):
     """(header offset, end offset, micro memory address, code) of the plausible MPG uploads in one file, in file order."""
     out = []
-    p = data.find(bytes([VIF_MPG]), 3)
-    while p != -1:
+    # IRQ is bit 7 of the command byte; both MPG and MPG|IRQ are legal.
+    consumed = 0
+    for match in re.finditer(rb'[\x4a\xca]', data):
+        p = match.start()
+        if p < max(3, consumed):
+            continue
         w = p - 3                                    # the code byte is the word's top byte (little endian)
         if w % 4 == 0 and w + 4 <= len(data):
             word, = struct.unpack_from('<I', data, w)
@@ -96,9 +103,8 @@ def uploads(gen, data):
                     code = data[start:end]
                     if plausible(gen, code):
                         out.append((w, end, addr, code))
-                        p = data.find(bytes([VIF_MPG]), end + 3)
+                        consumed = end + 3
                         continue
-        p = data.find(bytes([VIF_MPG]), p + 1)
     return out
 
 
@@ -185,23 +191,61 @@ def disc_files(disc, prof):
                 pass
 
 
+def source_signature(path, prof, generator):
+    """Local cache identity: source metadata, profile and both implementations. No game bytes in the report."""
+    names = [path] if os.path.isfile(path) else [os.path.join(path, n) for n in
+             [prof['executable']['name'], prof['disc']['toc'], *prof['disc']['paks'], '.disc_layout']]
+    sources = []
+    for name in names:
+        if os.path.isfile(name):
+            st = os.stat(name)
+            sources.append((os.path.abspath(name), st.st_size, st.st_mtime_ns))
+    return hashlib.sha256(json.dumps([sources, prof,
+        hashlib.sha256(open(__file__, 'rb').read()).hexdigest(),
+        hashlib.sha256(open(generator, 'rb').read()).hexdigest()], sort_keys=True).encode()).hexdigest()
+
+
+def read_cached(report_path, signature, out):
+    try:
+        report = json.load(open(report_path, encoding='utf-8'))
+        if report['signature'] != signature or not report['complete']:
+            return None
+        actual = {name for name in os.listdir(out) if re.fullmatch(r'disc_[0-9a-f]{16}\.bin', name)}
+        if actual != set(report['outputs']):
+            return None
+        for name, digest in report['outputs'].items():
+            if not re.fullmatch(r'disc_[0-9a-f]{16}\.bin', name):
+                return None
+            if hashlib.sha256(open(os.path.join(out, name), 'rb').read()).hexdigest() != digest:
+                return None
+        return report
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--game', default='gow1')
     ap.add_argument('--gen', required=True, help='vu1n_gen.py of the runtime')
     ap.add_argument('--max-images', type=int, default=0)
     ap.add_argument('--compare', default='')
+    ap.add_argument('--force', action='store_true', help='rescan even when source metadata and outputs match')
     ap.add_argument('disc')
     ap.add_argument('out')
     a = ap.parse_args()
     import profile as game_profile  # tools/pipeline/profile.py
     prof = game_profile.load(a.game)
     gen = load_gen(a.gen)
-    disc = discfs.open_disc(a.disc)
     os.makedirs(a.out, exist_ok=True)
-    for f in os.listdir(a.out):                      # this tool's earlier output (never the recorded micro memories)
-        if f.startswith('disc_') and f.endswith('.bin'):
-            os.remove(os.path.join(a.out, f))
+    signature = source_signature(a.disc, prof, a.gen)
+    report_path = os.path.join(a.out, 'disc-report.json')
+    cached = None if a.force or a.max_images or a.compare else read_cached(report_path, signature, a.out)
+    if cached:
+        print(f"[vu1-disc] cache hit: {cached['files']} files, {cached['kept']} images, {cached['blocks']} blocks")
+        return
+    disc = discfs.open_disc(a.disc)
+    started = time.monotonic()
+    outputs = {}
     seen_images, keys, words = set(), set(), set()
     last = None
     files = uploads = kept = 0
@@ -218,16 +262,37 @@ def main():
             if not new:
                 continue
             keys |= new
-            with open(os.path.join(a.out, f'disc_{h}.bin'), 'wb') as f:
-                f.write(img)
+            name_out = f'disc_{h}.bin'
+            path = os.path.join(a.out, name_out)
+            # Preserve timestamps of identical outputs: Ninja then keeps its compiled VU1 objects.
+            if not os.path.exists(path) or open(path, 'rb').read() != img:
+                with open(path + '.tmp', 'wb') as f:
+                    f.write(img)
+                os.replace(path + '.tmp', path)
+            outputs[name_out] = hashlib.sha256(img).hexdigest()
             kept += 1
             if a.max_images and kept >= a.max_images:
                 break
         if (kept, len(keys)) != last or files % 100 == 0:   # one line when something changed (not one per file)
             last = (kept, len(keys))
             print(f'@@status VU1 microcode: {files} files read, {kept} images, {len(keys)} blocks', flush=True)
+        if a.max_images and kept >= a.max_images:
+            break
+    complete = not (a.max_images and kept >= a.max_images)
+    if complete:
+        # Only prune this scanner's files after a completed scan. Recordings remain untouched.
+        for name in os.listdir(a.out):
+            if re.fullmatch(r'disc_[0-9a-f]{16}\.bin', name) and name not in outputs:
+                os.remove(os.path.join(a.out, name))
+    report = dict(signature=signature, complete=complete, files=files, uploads=uploads, kept=kept,
+                  blocks=len(keys), seconds=round(time.monotonic() - started, 3), outputs=outputs)
+    with open(report_path + '.tmp', 'w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2)
+    os.replace(report_path + '.tmp', report_path)
     print(f'[vu1-disc] {files} files, {uploads} program uploads, {len(seen_images)} distinct images, '
           f'{kept} kept, {len(keys)} distinct blocks -> {a.out}')
+    if not kept:
+        print('@@status No usable VU1 uploads found; use the runtime JIT or recorded code. Disc coverage is not guaranteed.')
     if a.compare:
         compare(gen, keys, words, a.compare)
 

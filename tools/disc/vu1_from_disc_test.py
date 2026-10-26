@@ -6,6 +6,7 @@ usage: python -I tools/disc/vu1_from_disc_test.py --gen <vu1n_gen.py> <micro mem
        (e.g. the one written by the runtime's tests/vu1_jit_test --write)
 """
 import argparse
+import json
 import os
 import random
 import struct
@@ -44,6 +45,11 @@ def main():
     code = open(a.micro, 'rb').read()
     gen = vu1_from_disc.load_gen(a.gen)
     want = vu1_from_disc.block_keys(gen, code)
+    packet = bytes(vif_upload(code))
+    irq_packet = bytearray(packet)
+    for offset, _, _, _ in vu1_from_disc.uploads(gen, packet):
+        irq_packet[offset + 3] |= 0x80
+    assert vu1_from_disc.scan(gen, bytes(irq_packet)) == vu1_from_disc.scan(gen, packet), 'MPG IRQ changes extraction'
     rng = random.Random(7)
     noise = bytearray(rng.getrandbits(8) for _ in range(64 * 1024))
     for _ in range(200):                                   # stray words that look like MPG headers
@@ -62,6 +68,26 @@ def main():
         if r.returncode:
             print(r.stderr)
             return 1
+        manifest_path = os.path.join(out, 'disc-report.json')
+        report = json.load(open(manifest_path, encoding='utf-8'))
+        assert report['complete'] and report['blocks'] == len(want)
+        times = {f: os.stat(os.path.join(out, f)).st_mtime_ns for f in report['outputs']}
+        args = [sys.executable, '-I', os.path.join(HERE, 'vu1_from_disc.py'), '--gen', a.gen, disc, out]
+        cached = subprocess.run(args, capture_output=True, text=True, check=True)
+        assert 'cache hit' in cached.stdout
+        assert times == {f: os.stat(os.path.join(out, f)).st_mtime_ns for f in times}
+        victim = next(iter(report['outputs']))
+        open(os.path.join(out, victim), 'wb').write(b'broken')
+        repaired = subprocess.run(args, capture_output=True, text=True, check=True)
+        assert 'cache hit' not in repaired.stdout
+        assert os.path.getsize(os.path.join(out, victim)) == vu1_from_disc.CODE_SIZE
+        # A forced identical scan must not touch the source files consumed by Ninja.
+        stamp = os.stat(os.path.join(out, victim)).st_mtime_ns
+        subprocess.run(args + ['--force'], capture_output=True, text=True, check=True)
+        assert os.stat(os.path.join(out, victim)).st_mtime_ns == stamp
+        limited = subprocess.run(args + ['--max-images', '1'], capture_output=True, text=True, check=True)
+        assert not json.load(open(manifest_path, encoding='utf-8'))['complete']
+        assert 'cache hit' not in subprocess.run(args, capture_output=True, text=True, check=True).stdout
         got = set()
         images = [f for f in os.listdir(out) if f.endswith('.bin')]
         for f in images:
@@ -69,6 +95,7 @@ def main():
     missing, extra = want - got, got - want
     print(f'blocks in the micro memory: {len(want)}, extracted: {len(got)} from {len(images)} images, '
           f'missing {len(missing)}, extra {len(extra)}')
+    print('PASS: IRQ uploads, cache reuse, output corruption recovery, stable timestamps, limited scan invalidation')
     return 0 if not missing and not extra else 1
 
 

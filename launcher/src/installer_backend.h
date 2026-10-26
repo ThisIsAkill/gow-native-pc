@@ -37,10 +37,13 @@ public:
     Q_INVOKABLE QVariantMap environment() const;
     // the compiled game (empty when not built yet)
     Q_INVOKABLE QString runnerPath() const;
+    Q_INVOKABLE void openRunnerFolder() const;
     // data/<game>/languages.json: [{language, label, edition, quality, elf}]
     Q_INVOKABLE QVariantList languages() const;
     // the recorded VU1 code was compiled in (optimize / native stage ran): the first play does not stutter
     Q_INVOKABLE bool firstPlayPrepared() const;
+    Q_INVOKABLE bool hasPendingNativeCode() const;
+    Q_INVOKABLE QVariantMap discScanReport() const;
     // pictures for the loading screen: the player's own images in data/<game>/loading (png, jpg, webp; none ship with
     // this repository), as file URLs, sorted by name
     Q_INVOKABLE QStringList loadingArt() const;
