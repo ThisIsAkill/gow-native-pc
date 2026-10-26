@@ -43,31 +43,41 @@ def load_gen(path):
     return mod
 
 
-def plausible(gen, code):
-    """Most pairs decode as VU instructions: known upper op and, without the I bit, a lower op the generator knows."""
-    pairs = len(code) // 8
-    if pairs < 2:
+# Every valid VU lower instruction (the upper side is checked with the generator's decoder): opcodes, the 0x40 group's
+# integer ops and the 0x40 group's special codes ((l & 3) | ((l >> 4) & 0x7C)): moves, loads/stores, FDIV, random, EFU,
+# XTOP/XITOP/XGKICK, MFP.
+LOWER_OPS = {0x00, 0x01, 0x04, 0x05, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x1A, 0x1B, 0x1C,
+             0x20, 0x21, 0x24, 0x25, 0x28, 0x29, 0x2C, 0x2D, 0x2E, 0x2F}
+LOWER_40_INT = {0x30, 0x31, 0x32, 0x34, 0x35}
+LOWER_40_SPECIAL = set(range(0x30, 0x44)) | {0x64, 0x68, 0x69, 0x6C, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x78, 0x79,
+                                              0x7A, 0x7B, 0x7C, 0x7D, 0x7E}
+MIN_PROGRAM_PAIRS = 8
+
+
+def valid_pair(gen, lower, upper):
+    if (upper >> 25) & 3 or gen.classify(upper)[0] == 'other':   # bits 25-26 are zero in every upper instruction
         return False
-    unknown = real = 0
-    for i in range(pairs):
+    if upper >> 31:                                                  # I bit: the lower word is a float immediate
+        return True
+    op = lower >> 25
+    if op == 0x40:
+        fn = lower & 0x3F
+        return fn in LOWER_40_INT if fn < 0x3C else ((lower & 3) | ((lower >> 4) & 0x7C)) in LOWER_40_SPECIAL
+    return op in LOWER_OPS
+
+
+def plausible(gen, code):
+    """Every pair is a valid VU instruction pair (all-zero padding aside) and there are at least a few. EE code is full of
+    words whose top byte is 0x4A (COP2 / VU0 macro instructions), so a looser test took MIPS code for microcode."""
+    real = 0
+    for i in range(len(code) // 8):
         lower, upper = struct.unpack_from('<II', code, i * 8)
-        if lower == 0 and upper == 0:      # padding between programs: neutral
+        if lower == 0 and upper == 0:      # padding between programs
             continue
-        if (upper >> 25) & 3:          # bits 25-26 are always zero in upper instructions
-            unknown += 1
-            continue
-        kind = gen.classify(upper)[0]
-        if kind == 'other':
-            unknown += 1
-            continue
-        if not (upper >> 31):
-            info = gen.lower_info(lower)
-            if info['calls_out'] and (lower >> 25) not in (0x40,):
-                unknown += 1
-                continue
-        if kind != 'nop' or lower not in (0, 0x8000033C):
-            real += 1
-    return real > 0 and unknown * 20 <= real        # at most 5 % odd pairs
+        if not valid_pair(gen, lower, upper):
+            return False
+        real += 1
+    return real >= 4
 
 
 def uploads(gen, data):
@@ -99,15 +109,20 @@ def scan(gen, data):
     snaps = []
     ups = uploads(gen, data)
     has_end = False
+    pairs = 0
     for k, (w, end, addr, code) in enumerate(ups):
         image[addr:addr + len(code)] = code
-        has_end = has_end or any((struct.unpack_from('<I', code, i * 8 + 4)[0] >> 30) & 1 for i in range(len(code) // 8))
+        n = len(code) // 8
+        pairs += n
+        # a program ends with an E bit followed by its delay pair
+        has_end = has_end or any((struct.unpack_from('<I', code, i * 8 + 4)[0] >> 30) & 1 for i in range(n - 1))
         nxt = ups[k + 1][0] if k + 1 < len(ups) else None
         joined = nxt is not None and nxt - end <= 8 and data[end:nxt] == bytes(nxt - end)
         if not joined:
-            if has_end:
+            if has_end and pairs >= MIN_PROGRAM_PAIRS:
                 snaps.append(bytes(image))
             has_end = False
+            pairs = 0
     return snaps
 
 
@@ -149,7 +164,13 @@ def disc_files(disc, prof):
     """(name, bytes) of the boot ELF and of every TOC entry"""
     elf = prof['executable']['name']
     if disc.has(elf):
-        yield elf, disc.read(elf)
+        data = bytearray(disc.read(elf))
+        try:                                         # the EE code itself (.text) holds no VIF packets
+            off, size, _ = discfs.elf_sections(bytes(data))['.text']
+            data[off:off + size] = bytes(size)
+        except (KeyError, struct.error, ValueError):
+            pass
+        yield elf, bytes(data)
     toc_name = prof['disc']['toc']
     if disc.has(toc_name):
         toc = discfs.parse_toc(disc.read(toc_name))
@@ -178,6 +199,9 @@ def main():
     gen = load_gen(a.gen)
     disc = discfs.open_disc(a.disc)
     os.makedirs(a.out, exist_ok=True)
+    for f in os.listdir(a.out):                      # this tool's earlier output (never the recorded micro memories)
+        if f.startswith('disc_') and f.endswith('.bin'):
+            os.remove(os.path.join(a.out, f))
     seen_images, keys, words = set(), set(), set()
     last = None
     files = uploads = kept = 0
