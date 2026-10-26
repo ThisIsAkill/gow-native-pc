@@ -1,5 +1,10 @@
 # VU1 code for every area: disc extraction + background compiler (prototype, 2026-10-26)
 
+> Update (same day): the full JIT of step 3 is done: **engine/patches/18, docs/research/vu1-x64-jit.md**. The launcher's
+> "Compile new areas while playing" now uses it (`GOW_VU1N_X64`); the background clang compiler below stays available
+> by hand. The disc extraction's first real run found no usable MPG packets with the loose check (EE COP2 words were
+> taken for microcode); the strict check (commit 4444f0f) has not been run on the disc yet.
+
 Problem: areas the first-play recording did not visit (after the ship onwards) run their VU1 microcode in the exact
 engine and drop to ~26 fps on machine A (Xeon E5-2666 v3 + RX 580). A session that went further recorded ~37,500 micro
 memories against 783 from the 4-minute recording, and "Speed up visited areas" gets slower every session.

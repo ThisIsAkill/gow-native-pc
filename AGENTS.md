@@ -54,8 +54,9 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16).
-  GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (background VU1 compiler, engine/patches/17, experimental: from
-  data/<id>/vu1_jit.json, which clang builds write; modules in data/<id>/vu1_jit).
+  GOW_VU1N_X64=1 (in-process x86-64 VU1 JIT, engine/patches/18, experimental: the Performance tab's "Compile new areas
+  while playing"; docs/research/vu1-x64-jit.md). GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (patch 17's background
+  clang compiler, by hand: data/<id>/vu1_jit.json, which clang builds write, names the values).
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
 - **Step texts** of build.ps1 (`=== record: ...`, `=== build the game ...`, ...) are matched by prefix in
@@ -112,5 +113,9 @@ copy, and records the choice in `data\build-root.txt`, which the launcher (runne
   `data/<id>/vu1n_heads.txt` (the runtime's CMake reads `<capture dir>/../vu1n_heads.txt`). The configure stage writes it
   from the profile's `runtime.vu1_native_heads` plus `vu1_capture/vu1n_heads_seen.txt` (recorded by the runtime while
   playing with the capture on). Without it, combat runs those blocks in the interpreter (44-50 instead of 55-60 fps).
+- VU1 native code has three producers that must stay equivalent: tools/vu1/vu1n_gen.py (the build), its --dll mode (patch
+  17) and the x86-64 JIT's translator (patch 18, a port of gen_block). Change vu1n_gen.py's semantics -> port it to
+  ps2_vu1_x64.inl in the same change and run tests/vu1_x64_fuzz_test (docs/research/vu1-x64-jit.md, section 6).
+- windows.h defines `near` and `far`: not usable as identifiers in runtime code that includes it (the VU1 JIT files).
 - Runtime fixes taken from the God of War II port must be checked on God of War: its `SetupThread` argc/argv change
   (5b1a25a) makes this game load its IRX as `cdrom0:\...;1` and hang at boot (left out of patch 05).

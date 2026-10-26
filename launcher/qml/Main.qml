@@ -214,8 +214,7 @@ ApplicationWindow {
             elf: elegido.elf, iso: "", ejecutable: ejecutableJuego,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
             capturaVu1: installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
-            // experimental: VU1 code met without native code is compiled in the background while playing (vu1_jit.json,
-            // written by clang builds)
+            // experimental: VU1 code met without native code is compiled while playing (x86-64 JIT, GOW_VU1N_X64)
             datosJit: ajustes.compilarAreas ? installer.repoRoot + "/data/" + installer.gameId : "",
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
