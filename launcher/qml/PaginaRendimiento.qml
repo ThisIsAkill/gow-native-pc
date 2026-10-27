@@ -69,13 +69,13 @@ ScrollView {
         Fila {
             titulo: Tema.t("autoNative")
             descripcion: Tema.t("autoNativeDesc")
-            separador: false
             Interruptor { checked: raiz.ajustes.autoNative; onToggled: raiz.ajustes.autoNative = checked }
         }
 
         Fila {
             titulo: Tema.t("runtimeDiagnostics")
             descripcion: Tema.t("runtimeDiagnosticsDesc")
+            separador: false
             Interruptor { checked: raiz.ajustes.diagnostics; onToggled: raiz.ajustes.diagnostics = checked }
         }
 
