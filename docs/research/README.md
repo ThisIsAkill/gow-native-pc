@@ -5,6 +5,7 @@ done, how it was measured, and what is left.
 
 | Document | Subject |
 |---|---|
+| [cutscene-audio-2026-10-26.md](cutscene-audio-2026-10-26.md) | Reproduced PT-BR A01MP02 channel-block misalignment; original-disc control, raw PCM comparison and correction plan |
 | [audio-standalone-mods-2026-10-26.md](audio-standalone-mods-2026-10-26.md) | Mixer overflow regression, direct launch, audio diagnosis, HUD and mod compatibility roadmap |
 | [jit-delivery-2026-10-26.md](jit-delivery-2026-10-26.md) | Patches 19-23, disc scan/cache, miss capture, incremental compilation, launcher integration, real-game JIT validation and next patches |
 | [vu1-x64-jit.md](vu1-x64-jit.md) | The in-process x86-64 VU1 JIT (engine/patches/18): design, contracts with the dispatcher, tests, how to extend it, risks |

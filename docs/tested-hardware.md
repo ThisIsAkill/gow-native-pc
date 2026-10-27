@@ -124,3 +124,12 @@ Standalone no-argument boot reached gameplay in a 100-second test with 2,000 VU1
 The 300-second empty load screen had zero missing/dropped samples after startup, 54.17-58.99 guest FPS after 20 s;
 this does not validate a populated save list. The final artifact checksum and standalone result were recorded after
 packaging; the embedded documentation predates those final result lines.
+
+## Cutscene audio investigation (2026-10-26, RX 580)
+
+Same installed clang runner and private card copies, 180 seconds per disc, new game then ATHN01D warp. A01MP02
+plays in both runs, graceful exit 0, no guest branch errors. PT-BR reproduces periodic PCM channel-block corruption
+before output resampling; original control matches the identical source audio at gain 0.999764 and residual RMS
+1.17 (source second 4). PT-BR residual is 2244.99, with 16,813 of 46,822 distinct-channel samples matching the wrong
+channel. No runtime fix is claimed. The player's card remains byte-identical to its backup.
+See [reproduction evidence and correction plan](research/cutscene-audio-2026-10-26.md).
