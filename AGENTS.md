@@ -73,6 +73,10 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
   Patch 27 A/B switches (not set by the launcher): GOW_VU1X_AVX=0 (SSE4.1 encodings), GOW_VU1X_SPECULATE=0 (no entry-lane
   speculation), GOW_VU1X_DUMP=<dir> (block code). Any vu1n_gen.py semantic change must be mirrored in ps2_vu1_x64.inl;
   tools/test/vu1-equiv.sh proves both give the same digests, tools/test/vu1-ir-measure.sh compares their speed.
+  Patch 28: static JAL calls use PS2Runtime::callGuestFunction (no per-call trace ring / dispatch history / perf hook).
+  GOW_DISPATCH_FULL=1 (runtime, not set by the launcher) sends every call through dispatchGuestBranch again, e.g. to get
+  JAL entries in the branch ring and the missing-function "trace=" history; PS2X_STATIC_CALLS=dispatch (ps2_recomp's
+  environment) generates the old dispatchGuestBranch call. Generated code must be regenerated (recomp stage) after it.
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
 - **Configure skip** (build.ps1 `Configure -MaySkip`, used by native / pgo): skipped when the cmake arguments and the
