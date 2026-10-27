@@ -351,7 +351,11 @@ if ($Stages -contains 'vu1disc') {
 }
 
 # --- configure ------------------------------------------------------------------------------------------------------
-function Configure([string]$dir = $bld, [string]$pgo = 'auto') {
+# -MaySkip: when the cmake arguments and the configure-time inputs are those of the last configure of $dir (signature in
+# $dir\gow-configure.sig), the configure is skipped: Ninja itself re-runs CMake when a CMakeLists.txt or a CONFIGURE_DEPENDS
+# glob (recorded microcode, runtime and IOP native sources) changes. The only configure-time input outside those is whether
+# vu1n_heads.txt exists (the VU1 generator rule depends on it only then). The explicit configure stage always runs.
+function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip) {
     Use-Toolchain
     Need (Join-Path $rec 'CMakeLists.txt') 'runtime (run the fetch stage)'
     $ltcgValue = if ($Ltcg) { 'ON' } else { 'OFF' }
@@ -394,10 +398,23 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto') {
     # Initial dependency downloads still work with UPDATES_DISCONNECTED (unlike FULLY_DISCONNECTED).
     $dependencyUpdates = if ($Stages -contains 'fetch') { 'OFF' } else { 'ON' }
     $extra += "-DFETCHCONTENT_UPDATES_DISCONNECTED=$dependencyUpdates"
-    Native 'cmake' (@('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
+    $cmakeArgs = @('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
-        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8') + $extra) 'cmake configure'
+        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8') + $extra
+    $sigFile = Join-Path $dir 'gow-configure.sig'
+    $sigText = ($cmakeArgs -join "`n") + "`nheads=$(Test-Path (Join-Path $data 'vu1n_heads.txt'))`nrec=$(Barra $rec)"
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $sig = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sigText))) -replace '-', '').ToLower()
+    $sha.Dispose()
+    if ($MaySkip -and (Test-Path (Join-Path $dir 'build.ninja')) -and (Test-Path (Join-Path $dir 'CMakeCache.txt')) -and
+        (Test-Path $sigFile) -and ((Get-Content $sigFile -Raw).Trim() -eq $sig)) {
+        Write-Host 'cmake configure: inputs unchanged, skipped (Ninja re-runs CMake itself when CMake files or globbed sources change)'
+        return
+    }
+    Remove-Item $sigFile -ErrorAction SilentlyContinue # a failed configure must not leave the old signature behind
+    Native 'cmake' $cmakeArgs 'cmake configure'
+    [IO.File]::WriteAllText($sigFile, $sig)
 }
 if ($Stages -contains 'configure') { Step "configure ($Config, $bld)"; Configure }
 
@@ -509,7 +526,7 @@ if ($Stages -contains 'pgo') {
     if ($Toolchain -ne 'clang') { throw 'the pgo stage needs -Toolchain clang' }
     $genBld = "$bld-pgogen"
     Step 'profile-guided optimisation: instrumented build'
-    Configure $genBld 'generate'
+    Configure $genBld 'generate' -MaySkip
     Build-Game $genBld
     $secs = if ($Seconds -gt 0) { $Seconds } else { [int]$prof.optimize.seconds }
     Step "profile-guided optimisation: the game plays itself for $secs s (hidden, in the background)"
@@ -533,7 +550,7 @@ if ($Stages -contains 'pgo') {
     $raw | Remove-Item
     Write-Host ("profile: {0} ({1:N0} MB)" -f $pgoProfile, ((Get-Item $pgoProfile).Length / 1MB))
     Step "rebuild with the profile ($Config, clang)"
-    Configure
+    Configure -MaySkip
     Build-Game
 }
 
@@ -566,7 +583,7 @@ if ($Stages -contains 'optimize' -or $Stages -contains 'native') {
     $nIop = @(Get-ChildItem $iopMods -Filter *.bin -ErrorAction SilentlyContinue).Count
     Write-Host "recorded: $nVu1 VU1 micro-memories, $nIop IOP modules"
     if ($nIop -gt 0) { Native $python @('-I', (Join-Path $rt $prof.runtime.iop_native_generator), $iopMods, (Join-Path $rec 'ps2xIOP\src\native')) 'IOP native code' }
-    Configure
+    Configure -MaySkip
     Step "rebuild ($Config)"
     Build-Game
     Set-Content -Path (Join-Path $data 'native.stamp') -Value "$nVu1" -Encoding ASCII

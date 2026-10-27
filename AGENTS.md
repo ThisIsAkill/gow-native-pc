@@ -70,8 +70,14 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
   A restore needs the game closed and first keeps the current card as a "backup" copy. There are no savestates: a copy
   holds the game's own last save (save altars), see docs/saves.md.
   GOW_VU1X_INLINE=0 selects the helper tier; GOW_VU1X_ONLY=1 is test-only (clears AOT registrations, requires JIT on).
+  Patch 27 A/B switches (not set by the launcher): GOW_VU1X_AVX=0 (SSE4.1 encodings), GOW_VU1X_SPECULATE=0 (no entry-lane
+  speculation), GOW_VU1X_DUMP=<dir> (block code). Any vu1n_gen.py semantic change must be mirrored in ps2_vu1_x64.inl;
+  tools/test/vu1-equiv.sh proves both give the same digests, tools/test/vu1-ir-measure.sh compares their speed.
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
+- **Configure skip** (build.ps1 `Configure -MaySkip`, used by native / pgo): skipped when the cmake arguments and the
+  existence of vu1n_heads.txt match `<build>\gow-configure.sig`; Ninja re-runs CMake itself for CMakeLists and
+  CONFIGURE_DEPENDS globs. Anything new read only at configure time must go into that signature.
 - **Step texts** of build.ps1 (`=== record: ...`, `=== build the game ...`, ...) are matched by prefix in
   LoadingScreen.qml (pasoDe) and InstallPage.qml (stepLabel): change both when renaming a step.
 - The runtime registers the game's overrides for the ELF **file name** (`SCUS_973.99`) in the ELF's folder, and uses

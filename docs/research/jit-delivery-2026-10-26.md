@@ -68,6 +68,8 @@ Machine A: Xeon E5-2666 v3, RX 580 2048SP, Windows, llvm-mingw clang 23.1.4, Rel
   samples ranged 15.40-33.35 FPS (median 28.40). Hybrid used existing AOT (zero JIT compilations), 32.95-59.58 FPS
   (median 56.55). These short scripted runs follow different simulation progress at different speeds; they are not
   a controlled same-frame performance comparison. JIT is a coverage fallback, not a replacement for AOT speed.
+  (Patch 27, later: the JIT's block code now executes about as many instructions as the AOT code on the synthetic
+  bench, see vu1-x64-jit.md §5.2; the real-game comparison has to be repeated.)
   Evidence: `data/gow1/logs/jit-jit-20261026-172927/` and `jit-hybrid-20261026-173110/`.
   An earlier run at `jit-jit-20261026-172736/` was rejected because the test harness set the presence-based
   `GOW_VU1_NATIVE_OFF` to the string `0`, disabling native execution. The harness now removes it and the path-based
@@ -104,7 +106,7 @@ file without changing Apps registration, shortcuts, saves or an existing install
 2. **Smaller capture representation.** Store block words and entry PC in a versioned, checksummed format, then feed
    the generator with conservative entry-lane assumptions. The current full-context images preserve compatibility;
    dropping them requires testing the legacy exact backend and every indirect target. Compare digests before rollout.
-3. **JIT hot loops.** Profile actual VU1 time; investigate retaining VF/ACC in SSE registers across proven self-loops,
+3. **JIT hot loops.** (Largely done by patch 27: vu1-x64-jit.md §5.2, §7 for what is left.) Profile actual VU1 time; investigate retaining VF/ACC in SSE registers across proven self-loops,
    then static timing for known entry states. Keep exact fallback and differential fuzz/AOT/replay verification.
    The existing chaining experiment gave only ~1-2%; do not assume that removing dispatch buys a large gain.
 4. **Shader warmup by observed variants.** Record encountered GS shader keys and compile/link timing per level;
@@ -115,7 +117,7 @@ file without changing Apps registration, shortcuts, saves or an existing install
    the documented EE/VU1 serial gap and texture/CLUT tint issue with deterministic captures. Early FINISH and GS
    display-write reordering require opt-in tests of readbacks/interrupts and both AMD and NVIDIA; do not enable the
    Waffle batching changes that previously saturated AMD. Shader compilation and frame rendering are separate costs.
-6. **Skip redundant CMake configuration.** The final no-change native run still spent 62.5 s configuring and 30.5 s
+6. **Skip redundant CMake configuration.** (Done: build.ps1 `Configure -MaySkip`, AGENTS.md "Configure skip".) The final no-change native run still spent 62.5 s configuring and 30.5 s
    generating, even with remote dependency updates disabled; Ninja then had no work. Add a configuration signature
    covering source/options/profile/head changes before safely skipping this work. Measure with no concurrent build.
 
