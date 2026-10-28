@@ -33,7 +33,7 @@ public:
     bool running() const { return m_process != nullptr; }
     QString stages() const { return m_stages; }
 
-    // {tools, buildTools, runtime, game, discs: bool; runtimeDir, runner, dataDir: string}
+    // {tools, runtime, game, discs: bool; runtimeDir, runner, dataDir: string}
     Q_INVOKABLE QVariantMap environment() const;
     // [diagnostics].frame_pc of games/<id>/game.toml (GOW_PERF_FRAME_PC with the diagnostics toggle), empty when absent
     Q_INVOKABLE QString diagnosticsFramePc() const;

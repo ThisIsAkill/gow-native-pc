@@ -62,7 +62,7 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches).
 | RAM | 8 GB (16 GB recommended while building) |
 | GPU | OpenGL 4.3+ |
 | Disk | ~25 GB free (extracted disc + build) |
-| Tools | [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/); the C++ compiler (clang, llvm-mingw) is downloaded by the first build. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) only for `-Toolchain msvc` or to build the launcher yourself |
+| Tools | [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/); the C++ compiler (clang, llvm-mingw) is downloaded by the first build. Visual Studio is not required; development builds of the launcher build a matching Qt from pinned sources |
 | Game | Your **God of War (NTSC-U, SCUS-97399)** ISO or a recognised translation |
 
 ## Getting started
@@ -90,12 +90,20 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches).
 
 From a terminal: `build.cmd -Discs "D:\God of War (USA).iso"` (examples in [`build.cmd`](build.cmd)).
 
-Compiler: clang ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw), downloaded once into `data\_tools`) is the
-default since 2026-10-25: about 15 minutes for a full build instead of 45-60 with Visual Studio, and no Visual Studio
-needed for the game. `build.cmd -Toolchain msvc` builds with the Visual Studio Build Tools instead; the choice is
-remembered in `data\toolchain.txt` and each compiler keeps its own build folder. `build.cmd -Stages pgo` lets an
-instrumented copy play the ship for a few minutes and rebuilds the game with that profile (profile-guided optimisation:
-on machine A combat 59.4 fps average / 57.9 minimum against 58.0 / 53.1 with MSVC).
+Compiler: Clang ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw)) is the single supported build toolchain for
+the game, launcher and installer. Tools and checksums are pinned in `tools/pipeline/toolchains.json`. The legacy
+`-Toolchain msvc` argument migrates to Clang; it no longer invokes Visual Studio. Existing build files are preserved.
+The first **developer launcher build** compiles its compatible Qt dependencies once and can take substantially longer
+than a game build; release users receive the prebuilt launcher.
+For an existing installation, run `build.cmd -Stages configure,recomp,sync,build` once to create the generation
+manifest before using the shorter `sync,build` maintenance path.
+
+Unchanged EE inputs now skip code generation, unchanged generated files keep their timestamps, and a local sccache
+reuses eligible C/C++ objects. Use `-ForceRecomp` to force generation and `-CompilerCache none` to disable the object
+cache. `build.cmd -Stages verify` runs regression tests without a disc. JSON timings are saved in `data/<game>/logs`.
+`build.cmd -Stages pgo` records a training profile and rebuilds with it; new profile contents invalidate old objects.
+See the [foundation design](docs/research/build-foundation-2026-10-28.md) and
+[updated roadmap](docs/research/roadmap-2026-10-27.md) for measurement gates and pending gameplay validation.
 
 ## Performance
 

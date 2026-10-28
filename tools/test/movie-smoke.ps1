@@ -13,10 +13,7 @@ $Card=(Resolve-Path -LiteralPath $Card).Path
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a new output directory' }
 $out=(New-Item -ItemType Directory -Path $OutputDirectory).FullName
 Copy-Item -LiteralPath $Card -Destination (Join-Path $out 'card.ps2')
-$tokens=$null; $errors=$null
-$ast=[System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../pipeline/build.ps1'),[ref]$tokens,[ref]$errors)
-$close=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Close-GameWindow'},$true)
-Invoke-Expression $close.Extent.Text
+. (Join-Path $PSScriptRoot '../pipeline/modules/process.ps1')
 $settings=@{GOW_MC0=(Join-Path $out 'card.ps2');GOW_AUDIO='0';GOW_AUDIO_PCM=(Join-Path $out 'output.s16le');GOW_AUDIO_RAW=(Join-Path $out 'mixed.s16le');GOW_AUDIO_STATS='1';GOW_MPEG_DIAG='1';GOW_PAD_TEST='1';GOW_PAD_GUION='99999:select';GOW_PAD_CAPTURAS='20,40,80';GOW_FAST_BOOT='0';GOW_SKIP_FMV='0';GOW_WINDOW_HIDDEN='1';GOW_MOVIE_OVERRIDE=$Movies;GOW_BONUS_MOVIE='24';GOW_BONUS_MOVIE_DELAY='8';GOW_VU1N_X64='1';PS2X_GS_HW='1';PS2X_GS_WORKER='1';TOBIICHI_PANORAMICO='16:9'}
 foreach($key in $settings.Keys) { Set-Item "env:$key" $settings[$key] }
 # FAST_BOOT is presence-based in this runtime; enter the title menu, then request one bonus movie.

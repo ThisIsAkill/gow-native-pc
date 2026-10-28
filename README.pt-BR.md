@@ -62,7 +62,7 @@ Waffle565 e KIexster), e aplica [`engine/patches`](engine/patches).
 | Memória | 8 GB (16 GB recomendado para compilar) |
 | Placa de vídeo | OpenGL 4.3+ |
 | Disco | ~25 GB livres (disco extraído + compilação) |
-| Ferramentas | [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/); o compilador C++ (clang, llvm-mingw) é baixado pela primeira compilação. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) só para `-Toolchain msvc` ou para compilar o launcher |
+| Ferramentas | [Git](https://git-scm.com/download/win), [Python 3](https://www.python.org/downloads/windows/); o compilador C++ (clang, llvm-mingw) é baixado pela primeira compilação. Visual Studio não é necessário; a compilação do launcher para desenvolvimento prepara o Qt compatível a partir do código-fonte |
 | Jogo | Sua ISO de **God of War (NTSC-U, SCUS-97399)** ou uma tradução reconhecida |
 
 ## Como usar
@@ -90,6 +90,15 @@ Waffle565 e KIexster), e aplica [`engine/patches`](engine/patches).
 3. **JOGAR**. Em **Outros → Idioma do jogo** você troca o idioma.
 
 Pelo terminal: `build.cmd -Discs "D:\God of War (USA).iso"` (exemplos no [`build.cmd`](build.cmd)).
+
+A compilação usa **Clang/llvm-mingw** para jogo, launcher e instalador, com ferramentas e hashes fixados no manifesto.
+O argumento antigo `-Toolchain msvc` migra para Clang. A primeira compilação do launcher para desenvolvimento prepara
+seu próprio Qt e pode demorar bastante; quem baixa a versão pronta recebe o launcher já compilado.
+
+Entradas idênticas pulam a geração de C++; arquivos inalterados mantêm suas datas e o sccache local reutiliza objetos
+compatíveis. `-ForceRecomp` força a geração; `-CompilerCache none` desliga o cache de objetos.
+`build.cmd -Stages verify` executa testes sem ISO, e `data/<jogo>/logs` guarda tempos por etapa em JSON.
+O [roadmap atualizado](docs/research/roadmap-2026-10-27.md) prioriza essa base antes do patch 30.
 
 ## Desempenho
 

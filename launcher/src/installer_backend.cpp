@@ -57,8 +57,8 @@ namespace
     }
 }
 
-// build.ps1's compiler for this copy (data/toolchain.txt; clang when nothing was built yet)
-static QString toolchainOf(const QString &root)
+// Read legacy installations for playing until the next successful clang build.
+static QString installedToolchain(const QString &root)
 {
     QFile file(root + QStringLiteral("/data/toolchain.txt"));
     if (file.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(file.readAll()).trimmed() == QStringLiteral("msvc"))
@@ -78,15 +78,23 @@ QString InstallerBackend::python() const
     return found.isEmpty() ? QStringLiteral("python") : found;
 }
 
-// every build tool build.ps1 downloads into data/_tools (see its "tools" stage): Git, Python, CMake, Ninja, and the clang
-// compiler unless this copy builds with MSVC
+// Read the same portable-tool manifest as the PowerShell pipeline.
 bool InstallerBackend::toolsReady() const
 {
-    const QString t = m_root + QStringLiteral("/data/_tools/");
-    for (const char *exe : {"mingit/cmd/git.exe", "python/python.exe", "cmake/cmake-3.31.12-windows-x86_64/bin/cmake.exe", "ninja/ninja.exe"})
-        if (!QFileInfo::exists(t + QLatin1String(exe)))
+    QFile manifest(m_root + QStringLiteral("/tools/pipeline/toolchains.json"));
+    if (!manifest.open(QIODevice::ReadOnly))
+        return false;
+    const auto tools = QJsonDocument::fromJson(manifest.readAll()).object().value(QStringLiteral("tools")).toObject();
+    if (tools.isEmpty())
+        return false;
+    for (auto it = tools.begin(); it != tools.end(); ++it) {
+        const auto tool = it.value().toObject();
+        const auto path = m_root + QStringLiteral("/data/_tools/") + tool.value(QStringLiteral("dir")).toString()
+            + QLatin1Char('/') + tool.value(QStringLiteral("exe")).toString();
+        if (!QFileInfo::exists(path))
             return false;
-    return toolchainOf(m_root) == QStringLiteral("msvc") || QFileInfo::exists(t + QStringLiteral("llvm-mingw-20261020-ucrt-x86_64/bin/clang++.exe"));
+    }
+    return true;
 }
 
 // the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders), chosen
@@ -108,7 +116,7 @@ QString InstallerBackend::runnerPath() const
 {
     // clang builds go to <build root>-clang (build.ps1)
     QString folder = buildRoot();
-    if (toolchainOf(m_root) == QStringLiteral("clang"))
+    if (installedToolchain(m_root) == QStringLiteral("clang"))
         folder += QStringLiteral("-clang");
     // A fresh installation must not reuse the default build folder of another repository copy.
     QFile cache(folder + QStringLiteral("/CMakeCache.txt"));
@@ -131,13 +139,9 @@ QString InstallerBackend::runnerPath() const
 
 QVariantMap InstallerBackend::environment() const
 {
-    const QString vswhere = qEnvironmentVariable("ProgramFiles(x86)") + QStringLiteral("/Microsoft Visual Studio/Installer/vswhere.exe");
     const QString runtimeDir = m_root + QStringLiteral("/engine/runtime");
     return {
-        {QStringLiteral("toolchain"), toolchainOf(m_root)},
-        // the build tools are downloaded by the pipeline (stage "tools"); only a copy switched to MSVC needs the Build Tools
         {QStringLiteral("tools"), toolsReady()},
-        {QStringLiteral("buildTools"), toolchainOf(m_root) == QStringLiteral("clang") || QFileInfo::exists(vswhere)},
         {QStringLiteral("runtime"), QFileInfo::exists(runtimeDir + QStringLiteral("/PS2Recomp/CMakeLists.txt"))},
         {QStringLiteral("game"), !runnerPath().isEmpty()},
         {QStringLiteral("discs"), !languages().isEmpty()},
@@ -260,9 +264,7 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
         args << QStringLiteral("-Discs") << isos.join(QLatin1Char('|'));
     const QString config = options.value(QStringLiteral("config"), QStringLiteral("Release")).toString();
     args << QStringLiteral("-Config") << config;
-    const QString toolchain = options.value(QStringLiteral("toolchain")).toString();
-    if (toolchain == QStringLiteral("clang") || toolchain == QStringLiteral("msvc"))
-        args << QStringLiteral("-Toolchain") << toolchain;
+    args << QStringLiteral("-Toolchain") << QStringLiteral("clang");
     if (options.value(QStringLiteral("ltcg")).toBool())
         args << QStringLiteral("-Ltcg");
     m_stages = stages;
@@ -381,7 +383,6 @@ bool InstallerBackend::needsRebuild() const
 void InstallerBackend::openRequirementPage(const QString &which) const
 {
     static const QVariantMap pages{
-        {QStringLiteral("buildTools"), QStringLiteral("https://visualstudio.microsoft.com/visual-cpp-build-tools/")},
         {QStringLiteral("git"), QStringLiteral("https://git-scm.com/download/win")},
         {QStringLiteral("python"), QStringLiteral("https://www.python.org/downloads/windows/")},
     };

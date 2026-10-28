@@ -18,6 +18,7 @@ Item {
     // fast this machine went so far). fixed: real-time steps (the game playing itself), not scaled.
     readonly property var etapas: ({
         tools: [{ id: "tools", w: 1 }],
+        verify: [{ id: "verify", w: 5 }],
         fetch: [{ id: "fetch", w: 1.5 }],
         discs: [{ id: "discs", w: 2 }],
         configure: [{ id: "configure", w: 1 }],
@@ -31,7 +32,7 @@ Item {
     })
     // the step of a "=== <step> ===" line (the texts build.ps1 writes)
     function pasoDe(s) {
-        var map = [["build tools", "tools"], ["runtime", "fetch"], ["discs", "discs"], ["configure", "configure"],
+        var map = [["verify runtime", "verify"], ["build tools", "tools"], ["runtime", "fetch"], ["discs", "discs"], ["configure", "configure"],
                    ["recompile the executable", "recomp"], ["generated code", "sync"], ["build the game", "build"],
                    ["profile-guided optimisation: instrumented", "pgoBuild"], ["profile-guided optimisation: the game", "pgoPlay"],
                    ["rebuild with the profile", "pgoRebuild"], ["record", "record"], ["native VU1", "native"], ["rebuild", "rebuild"],
@@ -41,7 +42,7 @@ Item {
         return ""
     }
     function nombrePaso(id) {
-        var map = { tools: "instStepTools", fetch: "instStepRuntime", discs: "instStepDiscs", configure: "instStepConfigure",
+        var map = { verify: "instStepVerify", tools: "instStepTools", fetch: "instStepRuntime", discs: "instStepDiscs", configure: "instStepConfigure",
                     recomp: "instStepRecomp", sync: "instStepSync", build: "instStepBuild", pgoBuild: "instStepPgo",
                     pgoPlay: "cargaPasoGrabar", pgoRebuild: "instStepPgo", record: "cargaPasoGrabar", native: "instStepNative",
                     rebuild: "cargaPasoFinal", vu1disc: "instStepVu1Disc" }

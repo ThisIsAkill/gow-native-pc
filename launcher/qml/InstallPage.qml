@@ -26,7 +26,6 @@ ScrollView {
     property bool showMore: false
     property bool prepareFirstPlay: true   // the install ends with the first-play preparation (optimize stage)
     property bool scanDisc: false
-    property string toolchain: env.toolchain || "clang"
     property var scanReport: installer.discScanReport()
     property bool lastOk: true
 
@@ -54,9 +53,9 @@ ScrollView {
         if (scanDisc) stages += ",vu1disc"
         stages += ",configure,recomp,sync,build"
         if (prepareFirstPlay) stages += ",optimize"
-        installer.run(stages, { isos: compatibleIsos(), config: "Release", toolchain: root.toolchain })
+        installer.run(stages, { isos: compatibleIsos(), config: "Release" })
     }
-    function maintenance(stages) { begin(); installer.run(stages, { config: "Release", toolchain: root.toolchain }) }
+    function maintenance(stages) { begin(); installer.run(stages, { config: "Release" }) }
     function pickIsos(paths) {
         if (env.tools) { installer.identify(paths); return }
         pendingIsos = paths                 // reading an ISO needs the portable Python: fetch the tools first
@@ -65,7 +64,7 @@ ScrollView {
     }
     // friendly name of a pipeline step ("=== <step> ===" lines of build.ps1)
     function stepLabel(s) {
-        var map = [["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
+        var map = [["verify runtime", "instStepVerify"], ["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
                    ["configure", "instStepConfigure"], ["recompile", "instStepRecomp"], ["generated code", "instStepSync"],
                    ["build the game", "instStepBuild"], ["record", "instStepRecord"], ["native VU1", "instStepNative"],
                    ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"], ["VU1 microcode from the disc", "instStepVu1Disc"]]
@@ -276,16 +275,6 @@ ScrollView {
             descripcion: root.env.game ? Tema.t("instGameReadyDesc") : Tema.t("instInstallDesc")
             hecho: root.env.game && !installer.running
             activo: root.canInstall || installer.running || root.env.game
-            Fila {
-                titulo: Tema.t("instCompiler")
-                descripcion: Tema.t("instCompilerDesc")
-                Selector {
-                    opciones: [{ texto: "clang", valor: "clang" }, { texto: "Visual Studio", valor: "msvc" }]
-                    valor: root.toolchain
-                    enabled: !installer.running
-                    onElegido: (v) => root.toolchain = v
-                }
-            }
             Fila {
                 titulo: Tema.t("instDiscScanOption")
                 descripcion: Tema.t("instVu1DiscDesc")

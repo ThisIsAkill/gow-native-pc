@@ -61,6 +61,11 @@ The final dedicated suite has ten isolated scenarios and 162 C++ checks, plus po
 Pipeline `fetch` verifies all patches, including 29a and 29b, form a valid chain and exactly match the runtime files.
 No gameplay, GS-frame equality, AMD/NVIDIA rendering or FPS improvement is claimed: no ISO/prepared disc was available.
 
+Follow-up after the user supplied a compatible PT-BR disc: the complete game now builds with Clang, reaches gameplay
+and passes 2,000 VU1 comparisons. Three paired same-binary lean/full runs average 42.90 / 41.59 guest FPS on this
+laptop. This small observed difference is not a main-branch comparison or frame-exact equivalence claim.
+See [current hardware evidence](../tested-hardware.md) and [build foundation](build-foundation-2026-10-28.md).
+
 Evidence (generated, not committed): `data/gow1/logs/guest-calls-before/`, `guest-calls-after/`,
 `review-codegen-tests.log`, `review-build.log` (full-suite compile failure), and `review-patch-chain.log`.
 

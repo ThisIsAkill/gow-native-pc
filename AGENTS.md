@@ -14,7 +14,11 @@ launcher, docs.
 games/<id>/game.toml        THE source of game-specific values (ELF name, CRC, .text SHA-1, runtime paths, disc layout,
                             editions incl. translations, optimize script, language hints). Never hard-code these.
 tools/pipeline/profile.py   loads profiles (Python dict / JSON for PowerShell and the launcher)
-tools/pipeline/build.ps1    stages fetch, discs, configure, recomp, sync, build, optimize, native, launcher
+tools/pipeline/build.ps1    entry point, parameters, checkout lock, stage selection and timing output
+tools/pipeline/modules/    common/tools/context/toolchain/process, runtime/game/optimize/verify/distribution/qt
+tools/pipeline/toolchains.json single pinned portable-tools + Qt source manifest (also read by the launcher)
+tools/pipeline/compat/     tested Qt source compatibility adapter; modules/qt.ps1 applies it before building the SDK
+tools/pipeline/recompile.py content-addressed EE generation, transactional publication, ownership-aware sync
 tools/disc/discfs.py        ISO / extracted folder / TOC / ELF helpers (format notes in its docstring)
 tools/disc/identify.py      ISO -> {game, edition, language, compatible, problems} (JSON)
 tools/disc/prepare.py       ISOs -> data/<id>/discs/*, languages.json, shared mc0 (see its docstring)
@@ -46,6 +50,15 @@ dependencies (git checkouts) exceed MAX_PATH under long paths. One folder per co
 cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` when `C:\gow-build` belongs to another
 copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
 The launcher also checks CMakeCache's source root before accepting a runner, so a fresh copy cannot use another copy's build.
+
+## Performance target for public builds
+
+Target stable 60 guest frames/s on modest and powerful supported PCs. The i5-8265U laptop and Xeon/RX 580 desktop
+are separate validation targets; compare revisions on the same hardware/settings and never transfer their FPS or
+build-time results between machines. Measure frame pacing and first-visit stalls, and require visible gameplay
+with sound before claiming a tier ready. Preserve portable CPU fallbacks and account for build RAM/disk pressure.
+The laptop has not yet met the 60 fps target. Follow the hardware-tier acceptance gates in
+`docs/research/roadmap-2026-10-27.md`; do not promise universal performance or classify an untested tier as supported.
 
 ## Contracts (do not break)
 
@@ -119,7 +132,9 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
 4. Runtime smoke test without a person: env `GOW_PAD_TEST=1 GOW_FAST_BOOT=1 GOW_SKIP_FMV=1 GOW_PAD_GUION=
    "5:start,12:x,18:x,24:x,30:x,36:x,42:x,48:x" GOW_PAD_CAPTURAS="10,80"` writes `gow_pad_test_N.ppm` (the GS output)
    in the working directory; stderr `[gow-pad2:test] state=11 levelReady=1` = gameplay reached. Frame rate:
-   `GOW_PERF_DIAG=1` prints `[gow-perf]` per 5 s (ee/vu/gs/iop/guest_wait ms, host_hz); `TOBIICHI_FPS_GOSTER=1` draws
+   `GOW_PERF_DIAG=1` prints `[gow-perf]` per 5 s (ee/vu/gs/iop/guest_wait ms, guest_flip_hz, host_hz);
+   use `GOW_PERF_DIAG=frames` for FPS comparisons without per-section timing overhead. Guest FPS requires the profile's
+   `diagnostics.frame_pc` in `GOW_PERF_FRAME_PC`; `host_hz` counts presentation, not gameplay. `TOBIICHI_FPS_GOSTER=1` draws
    the counter in the window.
 5. Record results in `docs/tested-hardware.md`.
    `tools/test/jit-smoke.ps1 -Mode hybrid|jit|calls` runs a scripted local test and writes logs, captures and summary.json.
@@ -133,11 +148,28 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
    hottest functions per thread (GameThread = EE, the VIF1/VU1 worker, GSThread). `GOW_VU1N_DIAG=1` prints native VU1
    counters every 5 s; `missBlocks` > 0 means block entries without native code (see vu1n_heads below).
 
+## Build foundation contracts
+
+- New builds use pinned llvm-mingw only. `-Toolchain msvc` is a migration alias, not another compiler path.
+  Never link MSVC/GCC-built Qt libraries into the llvm-mingw launcher. `modules/qt.ps1` builds a compatible Qt once.
+- Preserve the classic codegen, full dispatch and interpreter/slow-path references for differential testing.
+- `recompile.py` owns `data/<id>/recomp/out` and records hashes/ownership. A failed generation must not destroy the
+  last output; unchanged files keep timestamps; synchronization must not delete unrelated or edited files.
+- Pipeline holds `data/pipeline.lock`; do not run concurrent writers in one checkout. Metrics are local JSON logs.
+- Run `python -I tools/test/pipeline_tests.py` for pipeline changes, `build.cmd -Stages verify` for runtime/codegen
+  changes. The latter requires downloaded runtime but no ISO; it does not establish frame equivalence or FPS.
+- PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
+  `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
+- Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts
+  `29a` before `29-...`. Preserve the shared `Get-RuntimePatches` helper for both application and provenance logs.
+- `-Pdb` adds Clang CodeView and lld PDB flags; the upstream PDB option alone is MSVC-only. Keep symbols per executable.
+
 ## Known pitfalls
 
 - PowerShell 5.1: native stderr under `$ErrorActionPreference='Stop'` throws — use the `Native` helper in build.ps1;
+  never shadow `$global:LASTEXITCODE` with a local variable in that helper (it hides failed external commands).
   `-bxor` is signed; `Set-Content -Encoding UTF8` writes a BOM.
-- MSVC LTCG on this program links for hours: `PS2X_RELEASE_LTCG` stays OFF unless a user asks.
+- ThinLTO remains opt-in (`-Ltcg`) until measured link time, RAM and gameplay justify it. Historical MSVC LTCG took hours.
 - AMD Windows OpenGL: GS draw-batching changes from Waffle's 2026-10-17/18 commits saturated the GPU; the newer Waffle
   renderer sampled textures black. Test renderer changes on AMD and NVIDIA.
 - Windows `mklink /J` needs backslash paths.

@@ -1,6 +1,6 @@
 # God of War Native PC launcher (Qt 6 Quick): installs (runtime, discs, build) and plays. Based on the Tobiichi
 # Launcher by YYOzcan (GPL-3.0); see CREDITS.md.
-# Build: cmake -S launcher -B launcher/build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C launcher/build
+# Build with matching Qt and Clang: build.cmd -Stages launcher
 cmake_minimum_required(VERSION 3.21)
 project(GowNativePcLauncher VERSION 2.1.0 LANGUAGES CXX)
 

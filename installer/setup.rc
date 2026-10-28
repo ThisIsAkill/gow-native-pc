@@ -1,6 +1,7 @@
-// Resources of the installer (setup.cpp): icon (shared with the launcher) and version info; the manifest is added by
-// CMakeLists.txt.
-#include <winres.h>
+// Embed the manifest explicitly for llvm-rc, including per-monitor DPI and asInvoker.
+#include <windows.h>
+
+1 RT_MANIFEST "setup.manifest"
 
 1 ICON "../launcher/icon.ico"
 

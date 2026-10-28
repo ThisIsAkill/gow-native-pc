@@ -16,10 +16,7 @@ $profile = (& $python -I (Join-Path $root 'tools/pipeline/profile.py') $Game | O
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read game profile' }
 $runDir = Join-Path $data ('logs/jit-' + $Mode + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory $runDir | Out-Null
-$tokens = $null; $parseErrors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools/pipeline/build.ps1'), [ref]$tokens, [ref]$parseErrors)
-$close = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Close-GameWindow' }, $true)
-Invoke-Expression $close.Extent.Text
+. (Join-Path $root 'tools/pipeline/modules/process.ps1')
 $vars = @{ GOW_VU1N_X64='1'; GOW_VU1N_DIAG='1'; GOW_VU1N_VERIFY='2000'; GOW_PERF_DIAG='1'; GOW_PAD_TEST='1'; GOW_FAST_BOOT='1'; GOW_SKIP_FMV='1'; GOW_AUDIO='0'; GOW_WINDOW_HIDDEN='1'; PS2X_GS_HW='1'; PS2X_GS_WORKER='1'; GOW_GS_FINISH_ASINCRONO='1'; TOBIICHI_ANCHO='1280'; TOBIICHI_ALTO='720'; GOW_PAD_GUION=$profile.optimize.pad_script; GOW_PAD_CAPTURAS='10,80' }
 $vars.GOW_PERF_FRAME_PC = $profile.diagnostics.frame_pc
 if ($Audio) {

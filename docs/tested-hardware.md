@@ -1,5 +1,90 @@
 # Tested hardware and results
 
+## Build foundation validation (2026-10-28, i5-8265U laptop)
+
+Windows, Intel Core i5-8265U, 24 GB RAM, Intel UHD 620 / Radeon 520; pinned llvm-mingw 20261020 (Clang 23.1.4).
+This is a different machine from the Xeon/RX 580 gameplay measurements below. The supplied PT-BR standalone
+translation (ELF CRC `D95720D3`) was identified as compatible and prepared successfully.
+The owner confirms that this laptop is less powerful than the earlier RX 580 desktop. Keep hardware baselines
+separate: lower absolute FPS here does not establish a regression, and elapsed build times cannot be transferred
+to the desktop. Compare changes on the same machine, driver, power plan, scene and settings.
+
+- Eleven behavioral pipeline tests pass, plus PowerShell checks for configure reuse, PGO-content invalidation,
+  profile paths with spaces, cache opt-out and recording environment restoration on success/failure.
+- Real generation from a synthetic MIPS ELF passes in locals/classic modes; repeated inputs skip generation,
+  forced identical output preserves timestamps and synchronization makes no unnecessary copies.
+  The actual supplied ELF generated 6,418 C++/header files in 134.703 s (generation/publication timer).
+- `build.cmd -Stages verify` builds and passes ten isolated guest-call scenarios and all 68 codegen cases.
+  The pinned general memory suite still needs an independent repair of stale API references before patch 30.
+- A real one-object cache fixture measured 5.302 s cold / 0.402 s warm (cold includes daemon startup), with an
+  identical object hash and one cache hit. This is **not** a full-game compile-time or FPS measurement.
+  A second fixture confirms same-path PGO replacement misses the cache; output matches an uncached control after
+  normalizing COFF timestamps (two hits, three misses in the combined test, no unsupported/failed compilations).
+- Clang-built installer: synthetic package round-trip verifies two files, one LZMS block, 357 unpacked bytes;
+  imports are Windows system/UCRT DLLs, with no Visual C++ or libc++ runtime DLL requirement.
+- Invalid stage and concurrent pipeline invocations return exit code 1 through `build.cmd`; PowerShell syntax
+  parsing passes.
+- Final `fetch,verify,launcher` validation passes with the complete 01–29b patch chain. The Clang Qt 6.8.3 SDK
+  passes 24 sequence-sort compatibility cases. The deployed launcher starts and exits 0 with compiler/SDK paths
+  removed from `PATH`, displays the prepared PT-BR disc and reports the game ready; stderr is empty.
+  Fixed installation-time estimates were removed because duration depends on hardware and cached artifacts.
+- The first real pipeline (`fetch,discs,configure,recomp,sync,build`) completed in 2,005.895 s; the game build/link
+  stage took 1,625.804 s. After cleaning the runner target's 956 build outputs with Ninja, the same build/link
+  stage completed in 31.344 s with the populated local object cache (98.1% less elapsed time). This compares a
+  cold and warm object cache on the same Clang code/configuration, not Clang versus MSVC or a compiler speedup.
+- A stable `recomp,sync,build` invocation with unchanged inputs completed in 9.369 s: 2.721 s recompiler stage,
+  5.955 s synchronization, 0.272 s game build; no generated source was copied. The first cache-hit generation
+  validation itself took 2.090 s versus 134.703 s for generation/publication. Fetch/disc preparation are excluded.
+  Raw reports: `data/gow1/logs/foundation-{cold,stable-noop,cache-rebuild}-pipeline.json`.
+- First-install gameplay smoke: 100 s, PT-BR disc, Intel UHD 620 / OpenGL 3.3 driver 27.20.100.9664, hidden
+  1280x720 window, 2x dynamic resolution, audio off, no previously recorded AOT/IOP code. Gameplay reached;
+  2,000 VU1 comparisons passed, 623 JIT blocks compiled with zero unsupported, process exited 0 without forced
+  termination. The 80 s capture shows the ship, characters, textures and HUD. Eight diagnostic windows at
+  t >= 60 s measured 11.91–20.79 guest FPS (median 15.49). This instrumented JIT-first smoke is not a controlled
+  FPS comparison with prepared native code. Evidence: `data/gow1/logs/jit-hybrid-20261028-144139/`.
+
+After recording 109 VU1 images and eight IOP modules, the same Release executable was measured with lean/full
+call dispatch (`GOW_DISPATCH_FULL=0/1`). Settings: Intel UHD 620, fixed 1x internal scale, 1280x720 hidden window,
+16:9, FXAA off, audio off, hardware GS worker, async FINISH, VU1 recording/background compilation off, frames-only
+diagnostics, a GS screenshot at 80 s and the profile's pad script. Each run used a fresh private memory card; order was lean/full,
+full/lean, lean/full. All six 120 s runs reached gameplay and exited 0. Eleven five-second windows per run start
+after the 60 s warm-up. No compiler build ran during these measurements; the existing power plan was unchanged.
+
+| Round | Lean mean guest FPS | Full mean guest FPS |
+|---|---:|---:|
+| 1 | 42.64 | 42.19 |
+| 2 | 44.23 | 42.53 |
+| 3 | 41.84 | 40.05 |
+| Mean of runs | **42.90** | **41.59** |
+
+The observed difference is +3.2%, with overlapping ranges and visible run-to-run variation. This is a narrow
+same-binary comparison of call routing, **not main versus this branch**, not a statistically established general
+speedup, and not a per-frame p95/p99 measurement. Real-time scripted input does not guarantee identical guest frames
+at capture times, so screenshot equality is not asserted. Prepared native coverage shows zero misses/lane failures;
+the inspected lean and full captures show the ship, characters, textures and HUD. Later levels, heavy combat outside
+this scene, audio, AMD/NVIDIA and an actual main-branch build still require separate coverage.
+
+Evidence: `data/gow1/logs/perf-20261028-145147/{summary,statistics}.json` and the six run folders. The report records
+the runner SHA-256, settings, CPU, memory and power-plan identity; raw logs retain the graphics-driver information.
+
+Standalone follow-up: a 100 s no-argument launch with diagnostics supplied only by the boot file reaches gameplay,
+reports guest frames, verifies 2,000 VU1 runs with zero mismatches and exits 0. The test restores the original boot
+file and uses a private card. This functional test ran while Qt was building; no performance result is inferred.
+Evidence: `data/gow1/logs/standalone-20261028-150433/summary.json`.
+
+Final delivery: `launcher,package,installer` exits 0. The updated launcher capture has no fixed installation-time
+estimate and starts with only Windows system directories on `PATH` (exit 0, empty stderr). The generated setup's
+1,456 files / six LZMS blocks / 96,256,472 unpacked bytes independently decompress and match the staging directory.
+Setup SHA-256: `9e6acf2bb8328b1f928171c3b0c7e95718e5729aba578dc47ceddfa0f4d32cfe`.
+Evidence: `data/gow1/logs/foundation-delivery.log`, `launcher-clang-install-final.png` and
+`python -I tools/test/verify_setup.py data/_package/gow-native-pc-setup.exe data/_package/gow-native-pc`.
+This verifies the payload, not Windows registration or uninstallation. This final verification record postdates
+the documentation snapshot embedded in that package.
+
+Implementation and remaining acceptance gates: [build foundation](research/build-foundation-2026-10-28.md).
+
+## Gameplay measurements
+
 Frame rates of the game itself (the in-game counter, `TOBIICHI_FPS_GOSTER=1` / launcher "FPS counter"), on the
 Aegean Sea ship (first level, rain, several enemies) unless noted. The game never exceeds 60: its logic follows the
 PS2's 60 Hz VBlank. **These are references, not guarantees**: drivers, power plans, background programs and other
