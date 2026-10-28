@@ -27,13 +27,29 @@ target_include_directories(gow_codegen_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/ps2xRuntime/include"
     "${CMAKE_SOURCE_DIR}/ps2xRecomp/include")
 target_link_libraries(gow_codegen_tests PRIVATE ps2_runtime ps2_recomp_lib)
-# The upstream suite reads instructions.h relative to its working directory.
+# Isolate memory/DMA tests from unrelated stale upstream test modules.
+add_executable(gow_memory_tests "${CMAKE_CURRENT_LIST_DIR}/guest_memory_tests.cpp"
+    "${CMAKE_SOURCE_DIR}/ps2xTest/src/ps2_memory_tests.cpp"
+    "${CMAKE_SOURCE_DIR}/ps2xTest/src/test_function_table.cpp")
+target_compile_features(gow_memory_tests PRIVATE cxx_std_20)
+target_include_directories(gow_memory_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/ps2xTest/include" "${CMAKE_SOURCE_DIR}/ps2xRuntime/include"
+    "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib")
+target_link_libraries(gow_memory_tests PRIVATE ps2_runtime)
+if(MSVC)
+    target_link_options(gow_memory_tests PRIVATE /STACK:8388608)
+elseif(MINGW)
+    target_link_options(gow_memory_tests PRIVATE -Wl,--stack,8388608)
+endif()
 enable_testing()
+add_test(NAME gow_memory_tests COMMAND gow_memory_tests)
+set_tests_properties(gow_memory_tests PROPERTIES TIMEOUT 120)
 add_executable(gow_frame_metrics "${CMAKE_CURRENT_LIST_DIR}/frame_metrics.cpp")
 target_compile_features(gow_frame_metrics PRIVATE cxx_std_20)
 target_include_directories(gow_frame_metrics PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
 add_test(NAME gow_frame_metrics COMMAND gow_frame_metrics)
 add_test(NAME gow_codegen_tests COMMAND gow_codegen_tests)
+# The codegen suite reads instructions.h relative to its working directory.
 set_tests_properties(gow_codegen_tests PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 if(MSVC)
     target_link_options(gow_guest_calls PRIVATE /STACK:8388608)

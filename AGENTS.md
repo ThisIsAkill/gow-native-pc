@@ -169,6 +169,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - Pipeline holds `data/pipeline.lock`; do not run concurrent writers in one checkout. Metrics are local JSON logs.
 - Run `python -I tools/test/pipeline_tests.py` for pipeline changes, `build.cmd -Stages verify` for runtime/codegen
   changes. The latter requires downloaded runtime but no ISO; it does not establish frame equivalence or FPS.
+- `verify` includes the isolated `gow_memory_tests` suite (patches 29d–29f). Native DMA completes at submission and
+  reports through the completion queue; do not restore the removed DMAC pump/D_STAT model to satisfy old tests.
+  Texture tests use the production texture store and inspect primitive submissions without a GL context; they do
+  not validate GPU rasterization. `tools/test/session-game-smoke.py --visible` adds the separate gameplay check;
+  `--detailed` enables intrusive timing and must not be used as an FPS benchmark.
 - PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
   `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
 - Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts

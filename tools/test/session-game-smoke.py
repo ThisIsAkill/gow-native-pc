@@ -16,6 +16,8 @@ import zipfile
 parser = argparse.ArgumentParser()
 parser.add_argument("--game", default="gow1")
 parser.add_argument("--seconds", type=int, default=100)
+parser.add_argument("--visible", action="store_true", help="Show gameplay with audio enabled")
+parser.add_argument("--detailed", action="store_true", help="Enable intrusive per-call timing; not an FPS benchmark")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 profile = json.loads(subprocess.check_output([sys.executable, "-I", str(root / "tools/pipeline/profile.py"), args.game]))
@@ -27,12 +29,14 @@ output = data / "logs" / time.strftime("session-game-%Y%m%d-%H%M%S")
 output.mkdir()
 session = output / "session"
 session.mkdir()
-(session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {"test": "hidden window, audio enabled, scripted input"}}))
+(session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
+    "test": "scripted input, private card, audio enabled", "visible": args.visible,
+    "diagnostics": "detailed" if args.detailed else "frames", "seconds": args.seconds}}))
 env = {k: v for k, v in os.environ.items() if not k.startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
-env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HIDDEN="1",
+env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HIDDEN="0" if args.visible else "1",
            GOW_PAD_GUION=profile["optimize"]["pad_script"], GOW_PAD_TEST_NO_CAPTURE="1",
            GOW_MC0=str(output / "card.ps2"), GOW_VU1N_X64="1", GOW_VU1N_VERIFY="2000",
-           GOW_PERF_DIAG="frames", GOW_FRAME_DIAG="1", GOW_PERF_FRAME_PC=profile["diagnostics"]["frame_pc"],
+           GOW_PERF_DIAG="1" if args.detailed else "frames", GOW_FRAME_DIAG="1", GOW_PERF_FRAME_PC=profile["diagnostics"]["frame_pc"],
            GOW_AUDIO_STATS="1", GOW_IOP_DRIFT="1", GOW_VU1N_DIAG="1",
            GOW_VU1_SIN_COMPILAR="1", GOW_VU1_CAPTURE_MISSES="0", PS2X_GS_HW="1", PS2X_GS_WORKER="1",
            GOW_GS_FINISH_ASINCRONO="1", PS2X_GS_HW_SCALE="1", PS2X_GS_ESCALA="1", PS2X_GS_ESCALA_DINAMICA="0",

@@ -1,5 +1,50 @@
 # Tested hardware and results
 
+## Next-phase memory gate and gameplay checks (2026-10-28, i5-8265U laptop)
+
+Branch `claude/keen-dirac-42wd1y`, base `4283ea2` plus patches 29d–29f. Same prepared PT-BR disc, Intel UHD 620,
+fixed 1x rendering, visible 1280x720 window, audio enabled, scripted ship sequence and a private card per run.
+These are correctness/profiling checks, not a controlled before/after performance comparison.
+
+- The old memory suite initially failed to compile against removed native-DMA APIs. Restoring compilation exposed
+  20 failing cases out of 79. Migrating obsolete DMAC/CPU-rasterizer expectations preserved texture uploads and
+  primitive state/vertices through the real texture store and backend boundary. Two actual bugs remained:
+  scratchpad chain completion restored STR, and MMIO VIF/GIF submissions inflated the DMA counter.
+- Patches 29e/29f correct those defects. The isolated memory suite now passes **80/80**, including both scratchpad
+  directions, single completion, preserved mode, direct/empty/chained/MMIO counter paths and reinitialization.
+  This is not a claim that the entire upstream `ps2x_tests` executable is repaired.
+- `build.cmd -Stages fetch,verify,build` passes: the complete patch chain matches the working runtime, 11 Python
+  pipeline tests plus PowerShell cases, synthetic ELF generation, ten guest-call scenarios, 68 codegen cases,
+  frame metrics and the 80 memory cases. Incremental game build/link: **11.602 s**; whole pipeline: **54.848 s**.
+  Existing dependencies/cache were reused; this is not a cold build or EE recompile measurement.
+- Two 100-second visible gameplay runs (frames-only and intrusive timing) both reach `state=11, levelReady=1`,
+  verify 2,000 VU1 executions with zero mismatches, export valid local reports and exit 0 without forced termination.
+  Report checks also cover process memory, audio/IOP metrics and the player marker. No compiler ran during gameplay.
+
+Frames-only run: over eleven complete five-second windows starting after 40 seconds, weighted guest frequency was
+**23.36 Hz**, with window averages **16.58–27.96 Hz**. Window p95 was **54.227–91.896 ms**, p99 **65.053–166.130 ms**.
+The 60 fps gate remains open. This visible/audio run cannot establish a regression or gain against the earlier
+hidden/audio-off 42.90 Hz measurement. No listening assessment, image-parity comparison, thermal sensors or
+three-run reproducibility are claimed. Frames-only audio windows collected after 40 seconds have zero missing or
+dropped frames; startup did report missing frames.
+
+The separate intrusive run averaged per five-second window: VU **4148 ms**, EE **2241 ms**, GS **2270 ms**, IOP
+**917 ms**, guest wait **1850 ms** and host wait **4785 ms**. These are wall-time scopes on overlapping threads,
+including scheduler waits, not additive CPU percentages or GPU timings. It also logged **11,822 missing audio
+frames** after 40 seconds (zero dropped): detailed timing is not a transparent performance probe or an audio pass.
+The smoke harness checks presence of audio metrics, not zero underruns. Reproduce this separately before attributing
+the underrun to a particular subsystem.
+
+Both runs report zero native VU1 misses in the sampled interval. In the frames-only run, self-loops account for
+about **31.6% of native pairs** and **12.7% of native blocks**. Prioritize profiling VU1 execution/chain timing and
+EE/VU1 synchronization (roadmap 34/35); a larger JIT coverage effort is not justified by this ship trace. Keep the
+patch 30 address-boundary/MMIO differential gate and require repeated comparisons before enabling a new fast path.
+
+Evidence under `data/gow1/logs/`: `phase-next-validation.log`, `pipeline-20261028-164743-172.json`,
+`phase-next-summary.json`, and `session-game-20261028-164759` / `session-game-20261028-164946` (checks, raw logs,
+metrics, session metadata and exported ZIP). Runner SHA-256:
+`515a5bdbf91d6fdda3fee5f953d231d33119da8fdbc1d5ff49b3996ad738d682`.
+
 ## Session diagnostics validation (2026-10-28, i5-8265U laptop)
 
 Patch 29c and the separate Clang/Qt `gow-session` collector add local player reports. This is instrumentation,

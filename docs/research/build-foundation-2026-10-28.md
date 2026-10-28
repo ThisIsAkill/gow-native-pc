@@ -130,8 +130,9 @@ The complete frame-rate observations and rendering limitations are in [tested ha
   COFF timestamp. This verifies the pinned tool's profile hashing, in addition to the pipeline's Ninja invalidation.
 - `recompile-smoke.py` uses the real `ps2_recomp` on a synthetic three-instruction MIPS ELF. Generation, skip,
   forced regeneration with preserved timestamps, no-op synchronization and switching to classic codegen pass.
-- `build.cmd -Stages verify` builds the isolated guest-call and upstream codegen suites. The broader pinned upstream
-  memory tests still reference obsolete APIs and need repair before patch 30; the isolated suite does not hide that.
+- `build.cmd -Stages verify` builds the isolated guest-call and upstream codegen suites. Follow-up patches 29d–29f
+  restore the stale memory suite and add it to this gate (80 passing cases); they also correct scratchpad chain
+  completion and DMA submission counts. This does not certify all upstream test modules or patch 30 fast paths.
 - The Clang installer is built and its synthetic packed payload independently decompressed and compared byte-for-byte.
   This fixture test does not exercise registration/uninstallation of a real player installation.
 - Final `fetch,verify,launcher` validation passes. Qt 6.8.3 and the launcher build with the pinned Clang toolchain;
