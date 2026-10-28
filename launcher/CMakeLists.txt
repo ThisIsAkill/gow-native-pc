@@ -14,6 +14,8 @@ qt_add_executable(gow-launcher WIN32
     src/main.cpp
     src/lanzador.cpp
     src/lanzador.h
+    src/session_diagnostics.cpp
+    src/session_diagnostics.h
     src/installer_backend.cpp
     src/installer_backend.h
     src/mando.cpp
@@ -64,4 +66,12 @@ qt_add_qml_module(gow-launcher
 target_compile_definitions(gow-launcher PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}")
 target_link_libraries(gow-launcher PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
-install(TARGETS gow-launcher RUNTIME DESTINATION bin)
+qt_add_executable(gow-session WIN32 src/session_main.cpp src/session_diagnostics.cpp src/session_diagnostics.h)
+target_link_libraries(gow-session PRIVATE Qt6::Core)
+target_compile_definitions(gow-session PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}")
+if(WIN32)
+    target_link_libraries(gow-session PRIVATE psapi)
+    target_link_libraries(gow-launcher PRIVATE psapi)
+endif()
+
+install(TARGETS gow-launcher gow-session RUNTIME DESTINATION bin)

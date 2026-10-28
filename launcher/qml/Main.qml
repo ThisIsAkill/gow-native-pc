@@ -265,6 +265,11 @@ ApplicationWindow {
 
     Connections {
         target: lanzador
+        function onDiagnosticsExported(path) {
+            dialogoError.texto = Tema.t("diagnosticsExported")
+            dialogoError.detalle = path + "\n\n" + Tema.t("diagnosticsReportDesc")
+            dialogoError.open()
+        }
         function onJuegoTerminado(codigo, fallo, segundos, resumen) {
             ajustes.segundosJugados += segundos
             ajustes.ultimaSesion = segundos
@@ -1211,6 +1216,10 @@ ApplicationWindow {
                 BotonSecundario {
                     text: Tema.t("verRegistro")
                     onClicked: lanzador.abrirRegistro()
+                }
+                BotonSecundario {
+                    text: Tema.t("diagnosticsExport")
+                    onClicked: lanzador.exportDiagnostics()
                 }
                 BotonSecundario {
                     text: Tema.t("entendido")

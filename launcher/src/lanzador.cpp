@@ -1,4 +1,5 @@
 #include "lanzador.h"
+#include "session_diagnostics.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -167,6 +168,8 @@ QString Lanzador::rutaIcono() const
 
 QString Lanzador::rutaRegistro() const
 {
+    const QString session = m_session.isEmpty() ? SessionDiagnostics::latest(carpetaDatos() + "/registros") : m_session;
+    if (!session.isEmpty()) return session + "/runtime.log";
     return carpetaDatos() + QStringLiteral("/registros/ultimo.log");
 }
 
@@ -484,14 +487,17 @@ bool Lanzador::iniciar(const QVariantMap &a)
     if (!entorno.contains(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR")))
         entorno.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"), cache);
     aplicarTarjeta(entorno, a.value(QStringLiteral("gpu")).toString(), ejecutable);
-    if (a.value(QStringLiteral("diagnostics"), false).toBool())
-        for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"),
-                                   QStringLiteral("GOW_VU1N_DIAG"), QStringLiteral("GOW_PERF_DIAG")})
-            entorno.insert(key, QStringLiteral("1"));
+    // Frame-only accounting avoids the expensive per-call timing scopes in normal play.
+    entorno.insert(QStringLiteral("GOW_PERF_DIAG"), a.value(QStringLiteral("diagnostics"), false).toBool() ? QStringLiteral("1") : QStringLiteral("frames"));
+    entorno.insert(QStringLiteral("GOW_FRAME_DIAG"), QStringLiteral("1"));
+    for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"), QStringLiteral("GOW_VU1N_DIAG")}) {
+        if (a.value(QStringLiteral("diagnostics"), false).toBool()) entorno.insert(key, QStringLiteral("1"));
+        else entorno.remove(key);
+    }
     // The frame-loop pc of the profile ([diagnostics].frame_pc in games/<id>/game.toml), for the frame timings of
     // GOW_PERF_DIAG; tools/test/jit-smoke.ps1 passes the same value.
     const QString framePc = a.value(QStringLiteral("framePc")).toString();
-    if (a.value(QStringLiteral("diagnostics"), false).toBool() && !framePc.isEmpty())
+    if (!framePc.isEmpty())
         entorno.insert(QStringLiteral("GOW_PERF_FRAME_PC"), framePc);
     // Saves (F1 > Saves in game copies the card here; the Saves page restores them). The card path is set explicitly so
     // the game and the launcher always agree on it.
@@ -518,20 +524,29 @@ bool Lanzador::iniciar(const QVariantMap &a)
         if (boot.write(bytes) == bytes.size()) boot.commit();
     }
 
-    // Log: the previous game's log is kept as anterior.log.
-    const QString registro = rutaRegistro();
-    const QString anterior = carpetaDatos() + QStringLiteral("/registros/anterior.log");
-    QFile::remove(anterior);
-    QFile::rename(registro, anterior);
+    const QString helper = QCoreApplication::applicationDirPath() +
+#ifdef Q_OS_WIN
+        QStringLiteral("/gow-session.exe");
+#else
+        QStringLiteral("/gow-session");
+#endif
+    m_session = SessionDiagnostics::create(carpetaDatos() + "/registros", a);
+    if (m_session.isEmpty() || !QFileInfo::exists(helper)) {
+        emit error(QStringLiteral("diagnosticsError"), QStringLiteral("Cannot create the report or find gow-session.exe."));
+        return false;
+    }
+    const QString pin = buscarHaciaArriba(QCoreApplication::applicationDirPath(), QStringLiteral("engine/runtime.toml"));
+    const QString root = QFileInfo(pin).dir().absoluteFilePath(QStringLiteral(".."));
 
     delete m_proceso;
     m_proceso = new QProcess(this);
-    m_proceso->setProgram(ejecutable);
-    m_proceso->setArguments({elf});
+    // A separate collector keeps draining and sampling if the launcher window is closed.
+    m_proceso->setProgram(helper);
+    m_proceso->setArguments({m_session, ejecutable, elf, root});
     m_proceso->setProcessEnvironment(entorno);
     m_proceso->setWorkingDirectory(carpetaDatos());
     m_proceso->setProcessChannelMode(QProcess::MergedChannels);
-    m_proceso->setStandardOutputFile(registro);
+    m_proceso->setStandardOutputFile(QProcess::nullDevice());
     connect(m_proceso, &QProcess::finished, this, &Lanzador::terminado);
     connect(m_proceso, &QProcess::errorOccurred, this, [this](QProcess::ProcessError fallo)
     {
@@ -549,6 +564,12 @@ bool Lanzador::iniciar(const QVariantMap &a)
 
 void Lanzador::terminado(int codigo, QProcess::ExitStatus estado)
 {
+    QFile report(m_session + "/session.json");
+    if (report.open(QIODevice::ReadOnly)) {
+        const auto metadata = QJsonDocument::fromJson(report.readAll()).object();
+        if (metadata.contains("exit_code")) codigo = metadata.value("exit_code").toInt();
+        if (metadata.value("state").toString() == "crashed") estado = QProcess::CrashExit;
+    }
     const int segundos = static_cast<int>(m_reloj.elapsed() / 1000);
     const bool fallo = estado == QProcess::CrashExit || codigo != 0;
     QString resumen;
@@ -581,13 +602,23 @@ void Lanzador::detener()
 {
     if (!jugando())
         return;
-    m_proceso->terminate();
-    QProcess *proceso = m_proceso;
-    QTimer::singleShot(3000, proceso, [proceso]
-    {
-        if (proceso->state() != QProcess::NotRunning)
-            proceso->kill();
-    });
+    QFile request(m_session + "/stop.request");
+    if (request.open(QIODevice::WriteOnly)) request.write("stop\n");
+}
+
+void Lanzador::exportDiagnostics()
+{
+    const auto session = m_session.isEmpty() ? SessionDiagnostics::latest(carpetaDatos() + "/registros") : m_session;
+    QString detail;
+    const auto path = SessionDiagnostics::exportZip(session, &detail);
+    if (path.isEmpty()) { emit error(QStringLiteral("diagnosticsError"), detail); return; }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+    emit diagnosticsExported(path);
+}
+
+bool Lanzador::markDiagnostic(const QString &note)
+{
+    return jugando() && SessionDiagnostics::mark(m_session, note);
 }
 
 // ---------------------------------------------------------------- Saves (memory card copies)

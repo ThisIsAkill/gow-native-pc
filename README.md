@@ -111,6 +111,13 @@ The game is capped at 60 frames by design (its logic follows the PS2's 60 Hz VBl
 several machines, with each code combination that was tried: [`docs/tested-hardware.md`](docs/tested-hardware.md).
 The same settings may give different results on another machine — treat the table as a reference.
 
+## Reporting gameplay problems
+
+The launcher records a bounded report for each session. Use **Other → Mark a problem during play** when an issue
+occurs, then **Export report ZIP** after closing the game. Review and attach the ZIP to your bug report with the
+area and reproduction steps. No automatic upload; game files and saves are excluded. Detailed diagnostics are
+optional and can reduce FPS. See [report contents and instructions](docs/reporting-bugs.md).
+
 ## Translations and languages
 
 Fan translations are recognised by their executable (`games/gow1/game.toml`, `[[editions]]`). A translation that only

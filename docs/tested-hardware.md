@@ -1,5 +1,28 @@
 # Tested hardware and results
 
+## Session diagnostics validation (2026-10-28, i5-8265U laptop)
+
+Patch 29c and the separate Clang/Qt `gow-session` collector add local player reports. This is instrumentation,
+not a performance optimization. The existing ten guest-call scenarios and 68 codegen cases pass, alongside new
+frame-window checks for nearest-rank percentiles, invalid values, budget boundaries, fixed-storage overflow and reset.
+The full 01–29c patch chain applies and matches the runtime; game and launcher builds succeed.
+
+Seven real child-process integration cases cover crash code `c0000005`, nonzero exit, failed startup, process metrics,
+audio parsing, path/email redaction, exclusion of saves/ISO/environment secrets, markers, stop requests, bounded log
+rotation, ZIP CRC/integrity, oversized-input rejection and collection after the launching parent exits. An initial
+failed-start test exposed an exit-before-event-loop race in the collector; it is fixed and covered by the suite.
+
+A 100 s prepared PT-BR gameplay run with sound enabled and a hidden window reaches `state=11`, `levelReady=1`;
+2,000 VU1 comparisons report zero mismatches. The report contains guest interval distributions, process memory,
+audio and IOP windows and the player marker. The stop request exits 0 without forced termination. Exported ZIP
+contents validate independently. Evidence: `data/gow1/logs/session-game-20261028-161551/checks.json` and `report.zip`.
+This is functional coverage, not a listening test, a visible-presentation certification or a controlled FPS comparison.
+
+The Portuguese Other page renders the report export and marker controls; startup with only Windows system
+directories on `PATH` exits 0 with empty stderr. Evidence: `data/gow1/logs/session-diagnostics-ui.png`.
+Remaining measurement limits: collector overhead has not been quantified in paired game runs; actual GPU/display
+presentation latency, GPU utilization/VRAM and temperatures are not collected. See [report semantics](reporting-bugs.md).
+
 ## Build foundation validation (2026-10-28, i5-8265U laptop)
 
 Windows, Intel Core i5-8265U, 24 GB RAM, Intel UHD 620 / Radeon 520; pinned llvm-mingw 20261020 (Clang 23.1.4).

@@ -50,6 +50,8 @@ public:
     Q_INVOKABLE void detener();
     Q_INVOKABLE void abrirCarpeta(const QString &ruta) const;
     Q_INVOKABLE void abrirRegistro() const;
+    Q_INVOKABLE void exportDiagnostics();
+    Q_INVOKABLE bool markDiagnostic(const QString &note);
     // Application menu entry (and, when asked, a desktop shortcut).
     Q_INVOKABLE bool crearAccesoDirecto(bool escritorio) const;
     // Cover image chosen by the user: copied into the data folder (independent of the original); returns the
@@ -76,6 +78,7 @@ signals:
     void jugandoCambiado();
     void juegoTerminado(int codigo, bool fallo, int segundos, const QString &resumen);
     void error(const QString &clave, const QString &detalle);
+    void diagnosticsExported(const QString &path);
 
 private:
     QString rutaRegistro() const;
@@ -85,4 +88,5 @@ private:
 
     QProcess *m_proceso = nullptr;
     QElapsedTimer m_reloj;
+    QString m_session;
 };

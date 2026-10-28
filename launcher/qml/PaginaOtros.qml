@@ -129,6 +129,49 @@ ScrollView {
             }
         }
         Fila {
+            titulo: Tema.t("diagnosticsReport")
+            descripcion: Tema.t("diagnosticsReportDesc")
+            BotonSecundario {
+                anchors.right: parent.right
+                text: Tema.t("diagnosticsExport")
+                onClicked: lanzador.exportDiagnostics()
+            }
+        }
+        Fila {
+            titulo: Tema.t("diagnosticsMarker")
+            descripcion: Tema.t("diagnosticsMarkerDesc")
+            habilitada: lanzador.jugando
+            Column {
+                width: parent.width
+                spacing: 8
+                TextField {
+                    id: diagnosticNote
+                    width: parent.width
+                    maximumLength: 1000
+                    placeholderText: Tema.t("diagnosticsNote")
+                    selectByMouse: true
+                    color: Tema.texto
+                    placeholderTextColor: Tema.textoTenue
+                    font.pixelSize: 13
+                    background: Rectangle {
+                        color: Tema.lateral
+                        radius: 4
+                        border.color: diagnosticNote.activeFocus ? Tema.oro : Tema.borde
+                    }
+                }
+                BotonSecundario {
+                    anchors.right: parent.right
+                    text: Tema.t("diagnosticsMark")
+                    onClicked: {
+                        if (lanzador.markDiagnostic(diagnosticNote.text)) {
+                            raiz.aviso(Tema.t("diagnosticsMarked"))
+                            diagnosticNote.clear()
+                        }
+                    }
+                }
+            }
+        }
+        Fila {
             titulo: Tema.t("restablecer")
             descripcion: Tema.t("restablecerDesc")
             BotonSecundario {

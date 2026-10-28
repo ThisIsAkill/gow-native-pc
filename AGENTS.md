@@ -60,6 +60,17 @@ with sound before claiming a tier ready. Preserve portable CPU fallbacks and acc
 The laptop has not yet met the 60 fps target. Follow the hardware-tier acceptance gates in
 `docs/research/roadmap-2026-10-27.md`; do not promise universal performance or classify an untested tier as supported.
 
+## Player diagnostic reports
+
+`launcher/src/session_diagnostics.*` implements the independent `gow-session` collector and local report export.
+It must keep collecting when the launcher closes, preserve actual child exit codes, and stop only its own child.
+Reports use bounded files under launcher app data (`registros/sessions`), distinct from pipeline logs. Export only
+the explicit allowlist; never add ISOs, saves, full environment dumps or automatic uploads. Keep redaction and
+truncation indicators. Basic mode uses frames-only accounting; expensive per-call timing stays opt-in.
+Patch 29c supplies bounded guest-frame interval distributions with a profile-supplied frame PC. These are not
+GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the deployed helper after collector changes;
+`verify` includes frame-metric tests. Instructions and metric semantics: `docs/reporting-bugs.md`.
+
 ## Contracts (do not break)
 
 - **Pipeline output protocol** (parsed by `installer_backend.cpp`): `=== <step> ===`, `@@progress <done> <all>`,

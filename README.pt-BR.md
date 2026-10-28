@@ -106,6 +106,14 @@ O jogo é limitado a 60 quadros por design (a lógica segue o VBlank de 60 Hz do
 em várias máquinas, com cada combinação de código testada: [`docs/tested-hardware.md`](docs/tested-hardware.md).
 A mesma configuração pode dar resultados diferentes em outra máquina — trate a tabela como referência.
 
+## Relatar problemas durante o jogo
+
+Cada sessão iniciada pelo launcher guarda um relatório com tamanho limitado. Em **Outros → Marcar um problema
+durante o jogo**, registre o momento da falha. Depois de fechar o jogo, use **Exportar relatório ZIP**, revise o
+conteúdo e anexe ao relato do erro junto com a área e os passos para reproduzir. O envio é manual; ISO e saves
+ficam de fora. O diagnóstico detalhado é opcional e pode reduzir o FPS.
+Veja os [detalhes do relatório](docs/reporting-bugs.md).
+
 ## Traduções e idiomas
 
 Traduções de fãs são reconhecidas pelo executável (`games/gow1/game.toml`, `[[editions]]`). Uma tradução que só muda

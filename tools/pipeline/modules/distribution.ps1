@@ -18,6 +18,7 @@ if ($Stages -contains 'launcher') {
     }
     New-Item -ItemType Directory -Path $deploy | Out-Null
     Copy-Item -LiteralPath $builtExe -Destination $deploy
+    Copy-Item -LiteralPath (Join-Path $lb 'gow-session.exe') -Destination $deploy
     $exe = Join-Path $deploy 'gow-launcher.exe'
     # This SDK contains Release only. Auto detection avoids treating lld PE debug entries as a Debug CRT build.
     Native (Join-Path $qt 'bin\windeployqt.exe') @('--no-translations', '--no-compiler-runtime',

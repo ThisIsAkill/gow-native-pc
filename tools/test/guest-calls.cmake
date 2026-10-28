@@ -29,6 +29,10 @@ target_include_directories(gow_codegen_tests PRIVATE
 target_link_libraries(gow_codegen_tests PRIVATE ps2_runtime ps2_recomp_lib)
 # The upstream suite reads instructions.h relative to its working directory.
 enable_testing()
+add_executable(gow_frame_metrics "${CMAKE_CURRENT_LIST_DIR}/frame_metrics.cpp")
+target_compile_features(gow_frame_metrics PRIVATE cxx_std_20)
+target_include_directories(gow_frame_metrics PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
+add_test(NAME gow_frame_metrics COMMAND gow_frame_metrics)
 add_test(NAME gow_codegen_tests COMMAND gow_codegen_tests)
 set_tests_properties(gow_codegen_tests PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 if(MSVC)
