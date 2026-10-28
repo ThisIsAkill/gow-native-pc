@@ -7,6 +7,18 @@ areas of the game change the numbers. Add your own results with a pull request (
 
 ## Measured in this project
 
+### Call-path review (2026-10-28, no gameplay measurement)
+
+Intel Core i5-8265U, 24 GB RAM, Windows, llvm-mingw clang 23.1.4 Release, LTCG off. Patches 01–29 apply cleanly.
+New regressions reproduce late diagnostic-setting and worker-trace-window failures; follow-up 29a fixes both.
+Final call suite: ten isolated scenarios, 162 C++ checks plus trace-window assertion, all passing. Isolated upstream
+CodeGenerator suite: 68/68 after 29b updates two stale DMA/timer expectations. Pipeline verifies the complete patch chain.
+The full upstream test executable still cannot build because its memory tests reference removed APIs. No ISO/prepared
+disc was available, so gameplay, frame hashes and FPS gains are unverified. See [review](research/patches-28-29-review.md)
+for reproduction, local evidence and acceptance work before patch 30.
+
+### Earlier gameplay measurements
+
 **Machine A** — Intel Xeon E5-2666 v3 (10 cores / 20 threads, 2.9-3.5 GHz, Haswell), 16 GB RAM, AMD Radeon RX 580
 2048SP (driver 26.1.1, OpenGL), Windows 10 Pro 22H2 (19045), power plan "Maximum Performance", 1280×720 window,
 internal resolution 2× (dynamic), hardware renderer on.

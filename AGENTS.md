@@ -77,6 +77,8 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
   GOW_DISPATCH_FULL=1 (runtime, not set by the launcher) sends every call through dispatchGuestBranch again, e.g. to get
   JAL entries in the branch ring and the missing-function "trace=" history; PS2X_STATIC_CALLS=dispatch (ps2_recomp's
   environment) generates the old dispatchGuestBranch call for JAL and (patch 29) JALR. Generated code must be regenerated (recomp stage) after it.
+  Patch 29a snapshots call diagnostics per runtime after gow-native.boot restores the environment; do not move these
+  settings to pre-main static initialization. Worker trace time starts on the first dispatched call, not the first watched one.
   The pipeline's own runs (optimize, pgo) add GOW_WINDOW_HIDDEN=1 (engine/patches/15) and close the game with WM_CLOSE to
   its GLFW window (Close-GameWindow in build.ps1; Process.CloseMainWindow does not see hidden windows).
 - **Configure skip** (build.ps1 `Configure -MaySkip`, used by native / pgo): skipped when the cmake arguments and the
@@ -124,6 +126,8 @@ The launcher also checks CMakeCache's source root before accepting a runner, so 
    The game's guest-frame probe comes from `[diagnostics].frame_pc` in its profile.
    `tools/disc/vu1_analysis_cache_test.py --gen <generator> <procedural.bin>` checks cache/reference equality and invalidation.
    `tools/test/verify_setup.py <setup.exe> <staging dir>` checks every packaged byte without installing into Windows.
+   `tools/test/guest-calls.py <gow_guest_calls.exe> <output>` validates JAL/JALR parity, diagnostics and classic/locals
+   codegen without a disc. Build with `tools/test/guest-calls.cmake`; see `docs/research/patches-28-29-review.md`.
 6. Profiling: `build.cmd -Stages configure,build -Pdb` (Release with ps2EntryRunner.pdb, same code), then
    `tools/profile/sampler.cpp` (build line in its header) `sampler.exe ps2EntryRunner.exe <seconds> <delay>` prints the
    hottest functions per thread (GameThread = EE, the VIF1/VU1 worker, GSThread). `GOW_VU1N_DIAG=1` prints native VU1
