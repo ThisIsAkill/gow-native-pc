@@ -1,5 +1,103 @@
 # Tested hardware and results
 
+## Branch review (2026-10-28, Xeon / RX 580)
+
+`prototipo-claude` at `2e0f0cf`, plus the local review corrections below. Hardware: Xeon E5-2666 v3
+(10 cores / 20 threads), 17,012,953,088 bytes of RAM, Radeon RX 580 2048SP, driver 31.0.21924.61.
+The existing Maximum Performance power plan was read, not changed. This is separate from the laptop evidence.
+The recorded build directory was absent; other available builds belonged to different checkouts. All game tests
+here use the newly built `C:/gow-build-44a8e3b6-clang/ps2xRuntime/ps2EntryRunner.exe` and the prepared USA disc.
+
+### Review corrections and checks
+
+- Generated-file synchronization failed twice with Windows error 5 on different files. Bounded atomic-replacement
+  retries resolve transient Windows denials while preserving targets and propagating persistent failures.
+  All 14 Python pipeline regressions pass, including recovery/failure preservation.
+- Windows tar could not extract the Qt XZ archives without an external `xz` executable. The pinned Python now
+  streams XZ into a temporary plain tar. The PowerShell fixture and all three real Qt source extractions pass.
+- The collector omitted real `[vu1n]` / `[vu1x]` rows from structured metrics. Both tags now parse; seven deployed
+  collector integration tests pass, including the new assertions, redaction, export, crashes and parent exit.
+- The implemented Saves page had no sidebar entry. Page 7 is now reachable and renders without QML errors.
+  Previewing it did not create, import, delete or restore player saves.
+- Runtime `verify` passes: 80 memory/DMA cases, 68 code-generator cases, guest-call/codegen scenarios, synthetic
+  ELF generation, frame metrics and the PowerShell pipeline suite. The patch chain applies through 29f.
+- AOT, JIT-only and forced-SSE4.1 JIT checks each reach gameplay, verify 2,000 runs without mismatches and exit 0
+  without forced termination. Both JIT-only runs compile 623 blocks with zero unsupported blocks. These checks used
+  intrusive diagnostics; the JIT-only checks overlapped Qt compilation and are not FPS benchmarks.
+- Standalone startup using only the boot file passes gameplay/parity/exit checks and restores byte-identical boot
+  contents. The real-game collector check passes all 11 assertions, including native/JIT metrics and marker export.
+- Qt's 24 sorting compatibility cases pass. The deployed launcher starts with only Windows directories on PATH,
+  recognizes the game as installed and exits 0 after its screenshot, with empty stderr. The deployed collector
+  remains byte-identical to the binary that passed its integration tests after the sidebar rebuild.
+- The real compiler-cache fixture hits with identical output, and replacing PGO data at the same path misses the
+  cache and matches uncached compilation. This small fixture is not a game-build speedup measurement.
+
+### Build observations
+
+Clang 23.1.4, Release, existing PGO profile `54e4abaf0077464918e0e34425c4c03ce23542193331a72a22645eb27cdb33fa`,
+ThinLTO off, seven parallel compilers and 9,480 existing VU1 images. New native analysis generates 1,897 blocks;
+one unsupported block retains its fallback. No whole-game native-coverage claim is made.
+
+| Operation | Seconds | Scope |
+|---|---:|---|
+| Real EE generation | 55.329 | 6,418 C++/header files; first attempt before the synchronization correction |
+| Successful game compile/link | 1,041.542 | New build directory, existing PGO/native inputs; not a comparison against an older compiler |
+| Successful recomp/sync/build invocation | 1,136.719 | Includes the post-fix EE generation and synchronization |
+| Unchanged recomp/sync/build | 28.731 | Sum of successful stages before the independent Qt extraction failure; zero copied files or compilation |
+| First launcher invocation with matching Qt | 2,559.033 | Includes source bootstrap of QtBase, QtShaderTools and QtDeclarative, launcher build and deployment |
+| Incremental launcher/sidebar rebuild | 30.975 | Reuses the completed Qt SDK |
+
+Unchanged EE hash validation takes 3.951 s; the unchanged Ninja game stage takes 1.359 s. Most remaining no-op time
+is synchronization/hash I/O (18.061 s), a candidate for further profiling. Compilation-process working sets sampled
+every five seconds peak at 4,108,992,512 bytes; sampled private bytes peak at 3,692,318,720. Sampling began during
+the C++ stage, so this is not a guaranteed peak for the entire dependency/bootstrap pipeline.
+
+### Visible/audio FPS comparison
+
+Six 120-second runs, alternating lean/full order, fresh private-card paths, 60 seconds of warm-up per run,
+1280x720 visible window, fixed 1x scale, 16:9, FXAA/VSync off, hardware GS worker and asynchronous FINISH.
+Host cap: 120 Hz. Frame accounting/distributions and audio statistics are enabled; per-call timing, detailed VU1/IOP
+counters, verification and captures are disabled. No compiler or build process is active during these runs.
+Each run supplies eleven warmed five-second FPS windows and exits 0 without forced termination.
+
+| Call mode | Run means (guest FPS) | Mean | Five-second range |
+|---|---|---:|---|
+| Lean (default) | 57.77 / 54.66 / 57.54 | 56.66 | 50.58–59.79 |
+| Full dispatch reference | 58.36 / 57.24 / 58.18 | 57.93 | 53.37–59.99 |
+
+The default mode is 2.19% lower in this observation. This does not demonstrate an FPS gain or establish a causal
+regression: input follows real time, simulation progress differs, three runs provide limited repeatability, and
+temperatures/clocks were not collected. The same executable's dispatch switch does not recreate main or the entire
+older patch stack. **Stable 60 guest FPS is not achieved by this test.** All warmed audio windows have zero missing
+or dropped samples; none of the warmed guest-frame intervals exceed 100 ms. These are guest intervals, not GPU or
+display latency. There is no listening-test or whole-game audio certification.
+
+Across the warmed windows, median p95/p99 guest intervals are 20.049/27.002 ms (lean) and 19.869/26.042 ms
+(full). Worst intervals are 41.663 / 36.505 ms respectively. These are medians of individual five-second-window
+percentiles, not a percentile computed from all raw frames in the session.
+
+The local benchmark driver initially rejected the first run because its gameplay matcher expected adjacent fields;
+the raw line contains `pending` and `stage` between them. Its matcher was corrected, the raw logs validated, and
+the remaining runs resumed with unchanged settings/binary; the first measurements were retained.
+
+### Remaining review findings and acceptance limits
+
+- **Open: cross-instance save protection.** `Lanzador::jugando()` sees only its own `QProcess`. Closing the launcher
+  leaves the game/collector alive, but a fresh launcher has no such process object. `restaurarPartida()` therefore
+  does not reject that running game, and `iniciar()` can also start another instance. This violates the closed-game
+  restore requirement. Add a reliable running-session/card guard before treating Saves as fully accepted. This is
+  a source-review finding; no restore was attempted against a running player's card.
+- A host back-buffer snapshot omitted the HUD in both a JIT run and an AOT control, while other internal/host
+  snapshots show it. The captures are not the same guest frame and the omission is not isolated to JIT/AVX.
+  HUD correctness/fade behavior remains an observation to investigate, not a confirmed new regression.
+- No classic/locals frame-exact GS differential, Athens/heavy-area coverage, PT-BR movie check, 30-minute sustained
+  session, installation/uninstallation registration or NVIDIA validation was performed. The roadmap gates remain open.
+
+Local evidence (ignored): `data/gow1/logs/branch-review-20261028/` (settings, six session directories, FPS summary,
+build-memory samples and launcher captures), `review-20261028-*.log`, `jit-hybrid-20261028-201103/`,
+`jit-jit-20261028-203017/`, `jit-jit-20261028-203334/`, `standalone-20261028-204257/` and
+`session-game-20261028-210121/`. Review changes remain local and uncommitted; no game-derived assets belong in Git.
+
 ## Next-phase memory gate and gameplay checks (2026-10-28, i5-8265U laptop)
 
 Branch `claude/keen-dirac-42wd1y`, base `4283ea2` plus patches 29d–29f. Same prepared PT-BR disc, Intel UHD 620,

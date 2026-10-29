@@ -68,6 +68,8 @@ checks = {"exit_zero": meta["exit_code"] == 0, "gameplay": bool(re.search(r"stat
           "host_memory": any(r.get("private_bytes", 0) > 0 for r in metrics),
           "audio_metrics": any(r.get("tag") == "audio-stats" and "requested" in r.get("values", {}) for r in metrics),
           "iop_metrics": any(r.get("tag") == "iop-drift" and "advanced" in r.get("values", {}) for r in metrics),
+          "native_metrics": any(r.get("tag") == "vu1n" and "missBlocks" in r.get("values", {}) for r in metrics),
+          "jit_metrics": any(r.get("tag") == "vu1x" and "compiled" in r.get("values", {}) for r in metrics),
           "player_marker": any(r.get("type") == "player_marker" for r in events),
           "graceful_stop": not any(r.get("type") == "forced_termination" for r in events)}
 (output / "checks.json").write_text(json.dumps(checks, indent=2))

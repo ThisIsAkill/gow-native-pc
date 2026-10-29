@@ -30,11 +30,24 @@ def read_json(path):
         return {}
 
 
+def replace_file(source, destination):
+    # Windows scanners/indexers can briefly deny replacement despite writable files.
+    # Keep the previous file intact and bound retries; persistent access errors still fail.
+    for attempt in range(6):
+        try:
+            Path(source).replace(destination)
+            return
+        except PermissionError as error:
+            if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 5:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+
+
 def atomic_json(path, value):
     path = Path(path)
     temporary = path.with_suffix(path.suffix + '.tmp')
     temporary.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n', encoding='utf-8')
-    temporary.replace(path)
+    replace_file(temporary, path)
 
 
 def inventory(folder):
@@ -152,7 +165,7 @@ def sync_owned(sources, destination, state_path, previous=None):
             continue
         temporary = target.with_name(target.name + '.gow-tmp')
         shutil.copy2(source, temporary)
-        temporary.replace(target)
+        replace_file(temporary, target)
         changed += 1
     removed = 0
     for name in old.keys() - desired.keys():

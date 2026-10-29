@@ -47,13 +47,14 @@ class DiagnosticsTests(unittest.TestCase):
         return json.loads((self.session / "session.json").read_text(encoding="utf-8"))
 
     def test_exit_metrics_redaction_and_export(self):
-        self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)
+        self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('[vu1n] nativePairs=123 nativeBlocks=24 missBlocks=7 laneFails=0',flush=True)\nprint('[vu1x] compiled=12 unsupported=1 codeKB=20 avgCompileUs=4.0',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)
         meta = self.metadata()
         self.assertEqual(meta["state"], "nonzero_exit")
         self.assertEqual(meta["exit_code"], 7)
         self.assertTrue(meta["runner_sha256"])
         self.assertEqual(meta["observations"]["guest_fps_min_window"], 59.5)
         self.assertEqual(meta["observations"]["audio_missing_frames"], 12)
+        self.assertEqual(meta["observations"]["native_missBlocks_max_counter"], 7)
         rows = [json.loads(x) for x in (self.session / "metrics.jsonl").read_text().splitlines()]
         self.assertTrue(any(r.get("values", {}).get("guest_flip_hz") == 59.5 for r in rows))
         perf = next(r for r in rows if r.get("tag") == "gow-perf")
@@ -61,6 +62,10 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("ee_ms", perf["values"])
         audio = next(r["values"] for r in rows if r.get("tag") == "audio-stats")
         self.assertEqual((audio["missing"], audio["rate_max"], audio["level_min"], audio["level_max"]), (12, 1.025, 12, 450))
+        native = next(r["values"] for r in rows if r.get("tag") == "vu1n")
+        jit = next(r["values"] for r in rows if r.get("tag") == "vu1x")
+        self.assertEqual((native["nativePairs"], native["missBlocks"], native["laneFails"]), (123, 7, 0))
+        self.assertEqual((jit["compiled"], jit["unsupported"], jit["avgCompileUs"]), (12, 1, 4.0))
         self.assertTrue(any("cpu_percent_one_core" in r for r in rows))
         self.assertTrue(any(r.get("private_bytes", 0) > 0 for r in rows))
         (self.session / "private.ps2").write_text("SAVE_MUST_NOT_APPEAR")

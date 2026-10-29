@@ -30,7 +30,7 @@ engine/patches/NN-*.patch   changes to the runtime; header lines = what and why 
 launcher/                   Qt 6 launcher (from the Tobiichi Launcher). src/lanzador.* = play side (Tobiichi's, Spanish
                             names), src/installer_backend.* = install side (ours, English), qml/InstallPage.qml = tab.
                             Own look (not Tobiichi's): qml/Main.qml = sidebar (NavItem) + pages, `pagina` 0 Home,
-                            1 Install, 2-6 settings; colours in qml/Tema.qml (oro* hold the crimson accent);
+                            1 Install, 2-6 settings, 7 Saves; colours in qml/Tema.qml (oro* hold the crimson accent);
                             qml/LoadingScreen.qml = the screen over the whole launcher during long pipeline runs
                             (one overall bar planned from installer.stages and the "=== <step> ===" texts of
                             build.ps1, time left, tips cargaDica1..N, the player's own pictures in data/<id>/loading);

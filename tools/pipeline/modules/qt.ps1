@@ -1,5 +1,18 @@
 # Build only the Qt modules used by the launcher, with the same C++ ABI as the game tools.
 # Source archives and checksums are pinned in toolchains.json. No Visual Studio or system Python required.
+function Expand-QtSource([string]$archive, [string]$work) {
+    # Older Windows tar builds delegate XZ to an external executable that may not exist.
+    # The pinned Python includes liblzma; stream to a private tar file with bounded RAM.
+    $uncompressed = Join-Path $work ('qt-source-' + [guid]::NewGuid().ToString('N') + '.tar')
+    try {
+        $code = "import lzma, shutil, sys`nwith lzma.open(sys.argv[1], 'rb') as source, open(sys.argv[2], 'wb') as output:`n    shutil.copyfileobj(source, output, 1024 * 1024)"
+        Native $python @('-I', '-c', $code, $archive, $uncompressed) 'Qt source decompression'
+        Native (Join-Path $env:SystemRoot 'System32/tar.exe') @('-xf', $uncompressed, '-C', $work) 'Qt source extraction'
+    } finally {
+        Remove-Item -LiteralPath $uncompressed -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-ClangQt {
     Use-Clang
     $version = $toolManifest.qt.version
@@ -35,7 +48,7 @@ function Get-ClangQt {
                 Invoke-WebRequest -UseBasicParsing $module.url -OutFile $archive
             }
             if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $module.sha) { throw "$($module.name): source checksum mismatch" }
-            Native (Join-Path $env:SystemRoot 'System32/tar.exe') @('-xf', $archive, '-C', $work) 'Qt source extraction'
+            Expand-QtSource $archive $work
         }
         $qtBuild = Join-Path $work ($module.name + '-build')
         if ($module.name -eq 'qtbase') {

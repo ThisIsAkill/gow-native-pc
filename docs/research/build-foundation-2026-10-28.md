@@ -38,6 +38,10 @@ prints a migration status and selects Clang. The existing compiler marker change
 so a failed migration can still use the old installed game. Old build directories are not deleted.
 
 Qt 6.8.3 is built from its verified qtbase/qtshadertools/qtdeclarative archives into a compiler-specific prefix.
+Some Windows tar versions require an absent external `xz` executable for these archives. `Expand-QtSource` uses
+the pinned Python's liblzma to stream each verified archive into a temporary plain tar, extracts it with Windows
+tar, and removes the temporary file even on failure. This adds temporary disk usage during SDK bootstrap without
+requiring another installed tool. A real `.tar.xz` fixture is covered by the PowerShell pipeline tests.
 Its bootstrap syncqt source needs an explicit `<algorithm>` include with libc++ 23; the idempotent source adjustment
 is recorded in `modules/qt.ps1`. The Widgets source `qwidgetwindow.cpp` is excluded from unity batches because its
 export declaration conflicts with `qwidget.cpp` when Clang combines the two. Upstream declarations stay unchanged.
@@ -63,6 +67,11 @@ The PowerShell regression suite checks this ordering explicitly.
 environment (including codegen mode and any function-filter contents). A cache hit additionally requires every
 generated C++/header hash to match. Timestamps alone cannot hide changed inputs. `-ForceRecomp` bypasses this skip.
 Generated game data stays under ignored `data/`.
+
+The Xeon/RX 580 review reproduced transient Windows access-denied errors while replacing two different generated
+files. Atomic file replacement now retries Windows errors 5/32/33 up to six attempts (1.55 seconds of total backoff).
+Persistent failures still propagate and leave the previous target intact; other permission errors fail immediately.
+The Python regression suite covers recovery and failure preservation, and the real 6,418-file synchronization passes.
 
 Generation happens in a temporary sibling directory. Only successful, structurally complete output is published;
 failure leaves the previous output intact. Identical generated files retain timestamps. Publication uses sibling

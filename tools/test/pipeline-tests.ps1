@@ -23,6 +23,16 @@ if ([array]::IndexOf($patchNames, '29-recomp-dispatch-trim.patch') -ge [array]::
 Write-Host 'PASS: deterministic runtime patch order'
 $scratch = Join-Path $root ('data/pipeline-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
+. (Join-Path $root 'tools/pipeline/modules/qt.ps1')
+$archive = Join-Path $scratch 'qt-fixture.tar.xz'
+$archiveCode = "import io, sys, tarfile`nwith tarfile.open(sys.argv[1], 'w:xz') as archive:`n    member = tarfile.TarInfo('qt-fixture/CMakeLists.txt')`n    member.size = 7`n    archive.addfile(member, io.BytesIO(b'fixture'))"
+Native $python @('-I', '-c', $archiveCode, $archive) 'Qt source extraction fixture'
+Expand-QtSource $archive $scratch
+if ([IO.File]::ReadAllText((Join-Path $scratch 'qt-fixture/CMakeLists.txt')) -ne 'fixture' -or
+    @(Get-ChildItem $scratch -Filter 'qt-source-*.tar').Count -ne 0) {
+    throw 'Qt extraction must work without an external XZ executable and clean up its temporary tar'
+}
+Write-Host 'PASS: Qt XZ source extraction with the pinned Python and Windows tar'
 $bld = Join-Path $scratch 'build'
 $rt = Join-Path $root 'engine/runtime'
 $rec = Join-Path $rt 'PS2Recomp'

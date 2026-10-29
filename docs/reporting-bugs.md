@@ -44,6 +44,13 @@ In basic mode, the raw runtime line prints zero timing buckets; structured metri
 and set `timing_scopes_enabled=false`. The session's observation summary includes startup and loading windows, so
 its minimum FPS and maximum interval are investigative leads, not a gameplay benchmark.
 
+Detailed VU1/JIT output is also parsed from the runtime's `[vu1n]` and `[vu1x]` tags into `metrics.jsonl`.
+These counters include native misses, lane failures, compiled blocks and unsupported blocks; their values are
+not FPS. Most `[vu1n]` activity counters reset after each roughly five-second report; `[vu1x]` compilation counts
+are process totals. `native_missBlocks_max_counter` is the largest observed window count, not a session sum.
+`compiled=0` can mean the existing AOT code covered the scene;
+it does not prove that JIT execution has been tested.
+
 Windows process samples include CPU (`100%` = one logical core; values can exceed 100), working set/peak/private bytes,
 page faults, cumulative I/O byte counts, available system RAM and AC/battery state. Battery value 255 means unknown.
 There is no GPU utilization, VRAM, temperature or clock-speed sensor collection yet. A quiet log or a matching warning

@@ -458,7 +458,8 @@ ApplicationWindow {
                     { clave: "pestRendimiento", icono: "" },
                     { clave: "pestControles", icono: "" },
                     { clave: "pestTrucos", icono: "" },
-                    { clave: "pestOtros", icono: "" }
+                    { clave: "pestOtros", icono: "" },
+                    { clave: "pestPartidas", icono: "\uE74E" }
                 ]
                 delegate: NavItem {
                     required property var modelData

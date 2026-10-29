@@ -146,5 +146,54 @@ class GenerationTests(unittest.TestCase):
             pipeline.synchronize(self.root, 'demo')
 
 
+class WindowsReplacementTests(unittest.TestCase):
+    def test_transient_windows_denial_retries_without_losing_previous_file(self):
+        with tempfile.TemporaryDirectory(prefix='gow-replace-') as folder:
+            source, target = Path(folder) / 'pending', Path(folder) / 'current'
+            source.write_text('new')
+            target.write_text('previous')
+            replace = Path.replace
+            calls = 0
+
+            def temporarily_locked(path, destination):
+                nonlocal calls
+                calls += 1
+                if calls <= 2:
+                    self.assertEqual(target.read_text(), 'previous')
+                    error = PermissionError('temporary Windows replacement denial')
+                    error.winerror = 5 if calls == 1 else 32
+                    raise error
+                return replace(path, destination)
+
+            with patch.object(Path, 'replace', temporarily_locked), patch.object(pipeline.time, 'sleep') as sleep:
+                pipeline.replace_file(source, target)
+            self.assertEqual(calls, 3)
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.05, 0.1])
+            self.assertEqual(target.read_text(), 'new')
+            self.assertFalse(source.exists())
+
+    def test_persistent_denial_is_bounded_and_preserves_both_files(self):
+        with tempfile.TemporaryDirectory(prefix='gow-replace-') as folder:
+            source, target = Path(folder) / 'pending', Path(folder) / 'current'
+            source.write_text('new')
+            target.write_text('previous')
+            error = PermissionError('persistent Windows replacement denial')
+            error.winerror = 5
+            with patch.object(Path, 'replace', side_effect=error) as replace, patch.object(pipeline.time, 'sleep') as sleep:
+                with self.assertRaises(PermissionError):
+                    pipeline.replace_file(source, target)
+            self.assertEqual(replace.call_count, 6)
+            self.assertEqual(sleep.call_count, 5)
+            self.assertEqual(target.read_text(), 'previous')
+            self.assertEqual(source.read_text(), 'new')
+
+    def test_other_permission_errors_fail_immediately(self):
+        with patch.object(Path, 'replace', side_effect=PermissionError('access denied')) as replace, patch.object(pipeline.time, 'sleep') as sleep:
+            with self.assertRaises(PermissionError):
+                pipeline.replace_file('pending', 'current')
+        self.assertEqual(replace.call_count, 1)
+        sleep.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
